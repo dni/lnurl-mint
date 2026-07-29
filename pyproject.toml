@@ -1,0 +1,42 @@
+[project]
+name = "lnurl-mint"
+version = "0.0.0"
+description = "Minimal lnurlcash (LUD-XX, Lightning bearer assets) backend."
+authors = [{ name = "dni", email = "dni@lnbits.com" }]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi[standard]>=0.115.11,<0.116.0",
+  "bolt11",
+  "httpx",
+  "pydantic-settings>=2.0,<3.0",
+  "qrcode>=8.2",
+  "bech32>=1.2.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=7.4.0,<8.0.0",
+  "black>=24.3.0,<25.0.0",
+  "ruff>=0.4.0",
+  "mypy>=1.5.1,<2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lnurl_mint"]
+
+[tool.mypy]
+ignore_missing_imports = "True"
+files = "lnurl_mint"
+
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+lint.select = ["E", "F", "I"]
