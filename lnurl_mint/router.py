@@ -213,7 +213,12 @@ async def get_withdraw_callback(
 
     - single k1 + pr: melt - the note is burned, `pr` (of exactly its
       value) gets paid. Plain {"status": "OK"}. `pr` MUST NOT be combined
-      with multiple k1s or with `amount` - merge (or split) first.
+      with multiple k1s or with `amount` - merge (or split) first. If `pr`
+      is itself a still-outstanding invoice this same mint issued (see
+      create_mint), it's settled directly instead of actually being paid
+      over Lightning - functionally a rotate reached via payRequest/
+      withdrawRequest instead of the dedicated rotate callback, without the
+      pointless fee and failure exposure of a node paying itself.
     - one k1, no pr, no amount: rotate - burned and replaced by a fresh
       note of the same value.
     - one k1 + amount: split - burned; `k1` in the response carries
@@ -248,6 +253,23 @@ async def get_withdraw_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invalid invoice: {exc!s}")
         if decoded.amount_msat != total_msat:
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invoice must be for exactly {total_msat} msat.")
+
+        # self-payment: `pr` is itself a still-outstanding invoice this same
+        # mint issued via /p/cb. Paying it over Lightning would just be the
+        # funding source routing a payment back to itself, so settle it
+        # directly instead: burn these notes and mark that invoice's
+        # payment_hash minted, atomically, with no Lightning round-trip.
+        # Whoever holds *that* invoice's preimage can then redeem the note
+        # it produces exactly as if it had been paid for real.
+        if decoded.has_payment_hash and notes.pending_mint(decoded.payment_hash) is not None:
+            notes.swap(note_ids, [])
+            if notes.settle_mint(decoded.payment_hash) is None:
+                # lost the race - a real payment or a concurrent self-payment
+                # settled this same invoice first
+                notes.restore(note_ids)
+                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Invoice already settled.")
+            return WithdrawSuccessResponse()
+
         funding_source = _funding_source()
         # burn first so a concurrent request can't double-spend while the
         # payment is in flight; a failed payment restores the notes intact.
