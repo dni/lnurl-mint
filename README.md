@@ -85,7 +85,21 @@ Configure the funding source via `.env` (see `.env.example`), lnd or cln REST.
 Without one, minting and melting are unavailable (rotate/split/merge of existing
 notes still work).
 
-`make dev`/`make serve`/`make run` (Docker) default to port 8001, not 8000,
+**cln rune**: this mint only ever calls `invoice`, `pay`, `signmessage`,
+`listinvoices` and `getinfo` (see `node.py`), so scope `FUNDINGSOURCE_RUNE` to
+just those instead of handing it a full-access rune:
+
+```sh
+lightning-cli createrune restrictions='[["method=invoice","method=pay","method=signmessage","method=listinvoices","method=getinfo"]]'
+```
+
+The command's JSON output's `rune` field is the value for `FUNDINGSOURCE_RUNE`.
+The single `[...]` restriction is an OR list (any of these five methods, and
+nothing else) - a comma-separated top-level list instead would AND further
+restrictions on top (e.g. `pnum=0` to also disallow all requests with
+parameters).
+
+`make dev`/`make serve`/`make run` (Docker) default to port 8111, not 8000,
 meant to run alongside a full `lnurl_server` instance on the same host, which
 typically already claims 8000. Override with `make run PORT=...`.
 
@@ -116,16 +130,14 @@ one, must point at a path that exists *inside* the container - if your lnd/cln
 cert lives on the host, bind-mount it in too (`-v /host/path/tls.cert:/tls.cert:ro`
 and point `FUNDINGSOURCE_CERT_PATH=/tls.cert` at the mounted path).
 
-`make build`/`make run` wrap the same image for this repo's own local dev
-setup specifically: `make run` joins a `lnurlserver_default` Docker network and
-mounts certs from a sibling `lnurl_server` checkout so this mint can reach that
-project's e2e regtest lnd/cln by internal hostname (see the Makefile's
-`NETWORK`/`CERTS_DIR` and `.env`'s comments) - useful if you're developing
-alongside that repo, but not a generic deployment recipe. For a real
-deployment, adapt the standalone `docker run` above instead: put it on its own
-network (or `--network host` if nothing else needs that port), point
-`FUNDINGSOURCE_URL` at your own node, and front it with a reverse proxy for
-TLS if it's reachable from the internet.
+`make build`/`make run` wrap exactly the recipe above (same plain bridge
+network, same `.env`, same volume) - `make run PORT=...` just picks which
+host port it's published on, defaulting to 8111 (see `make dev`'s docstring
+above for why). If your funding source lives on another Docker network (e.g.
+a sibling `lnurl_server` checkout's regtest stack) or needs a TLS cert that
+only exists on the host, add your own `--network`/`-v` flags to the `docker
+run` in the Makefile, or run the command directly instead. Front it with a
+reverse proxy for TLS if it's reachable from the internet.
 
 ## Test
 
