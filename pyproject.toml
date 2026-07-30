@@ -1,6 +1,6 @@
 [project]
 name = "lnurl-mint"
-version = "0.0.0"
+version = "0.0.1"
 description = "Minimal lnurlcash (LUD-XX, Lightning bearer assets) backend."
 authors = [{ name = "dni", email = "dni@lnbits.com" }]
 license = "MIT"

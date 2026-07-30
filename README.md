@@ -89,6 +89,44 @@ notes still work).
 meant to run alongside a full `lnurl_server` instance on the same host, which
 typically already claims 8000. Override with `make run PORT=...`.
 
+## Docker
+
+Pull the published image (see [Release](#release)) or build it locally:
+
+```sh
+docker pull dni/lnurl-mint          # or: make build
+```
+
+Run it standalone - a plain bridge network, `.env` for configuration (copy
+`.env.example` and fill it in), and a bind-mounted file so the sqlite
+database survives container restarts:
+
+```sh
+mkdir -p data && touch data/mint.db
+docker run --restart always -d --name lnurl-mint \
+  -p 8000:8000 \
+  --env-file .env \
+  -v "$(pwd)/data/mint.db:/app/mint.db" \
+  dni/lnurl-mint
+```
+
+The container always listens on `8000` internally - map it to whichever host
+port you want via `-p <host-port>:8000`. `FUNDINGSOURCE_CERT_PATH`, if you set
+one, must point at a path that exists *inside* the container - if your lnd/cln
+cert lives on the host, bind-mount it in too (`-v /host/path/tls.cert:/tls.cert:ro`
+and point `FUNDINGSOURCE_CERT_PATH=/tls.cert` at the mounted path).
+
+`make build`/`make run` wrap the same image for this repo's own local dev
+setup specifically: `make run` joins a `lnurlserver_default` Docker network and
+mounts certs from a sibling `lnurl_server` checkout so this mint can reach that
+project's e2e regtest lnd/cln by internal hostname (see the Makefile's
+`NETWORK`/`CERTS_DIR` and `.env`'s comments) - useful if you're developing
+alongside that repo, but not a generic deployment recipe. For a real
+deployment, adapt the standalone `docker run` above instead: put it on its own
+network (or `--network host` if nothing else needs that port), point
+`FUNDINGSOURCE_URL` at your own node, and front it with a reverse proxy for
+TLS if it's reachable from the internet.
+
 ## Test
 
 ```sh
