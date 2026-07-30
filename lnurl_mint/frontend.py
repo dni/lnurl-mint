@@ -80,7 +80,7 @@ PAGE = Template(
   <p class="hint">
     After paying, redeem your bearer note at
     <a href="https://dni.github.io/lnurl-wallet" target="_blank" rel="noopener">dni.github.io/lnurl-wallet</a>
-    &mdash; enter this mint's URL (<code>$base</code>) and the payment preimage.
+    &mdash; enter the mint's lightning address (<code>$address</code>) and the payment preimage.
   </p>
   $tor_section
   <h2>Node</h2>
@@ -166,7 +166,6 @@ async def index(req: Request) -> HTMLResponse:
         qr_svg=_qr_svg(lnurl),
         lnurl=lnurl,
         address=html.escape(address),
-        base=html.escape(base),
         tor_section=_tor_section(base),
         node_section=await _node_section(),
     )
