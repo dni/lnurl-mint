@@ -18,10 +18,30 @@ class LnurlPayResponse(BaseModel):
 
 class LnurlPayActionResponse(BaseModel):
     """LUD-06 callback response - paying `pr` mints a bearer note under the
-    payment preimage."""
+    payment preimage.
+
+    `verify` (LUD-21, optional) lets a wallet with no node of its own poll
+    settlement status - omitted unless VERIFY_ENABLED is set."""
 
     pr: str
     routes: list = []
+    verify: str | None = None
+
+
+class LnurlPayVerifyResponse(BaseModel):
+    """LUD-21: settlement status for an invoice minted via `/p/cb`.
+
+    `preimage` is intentionally never populated: for lnurlcash the preimage
+    IS the bearer note's spend secret (see LUD-XX's Minting a bearer note
+    from a payRequest), so returning it here - to anyone who merely knows
+    the payment_hash, no proof of payment required - would let them steal
+    the note the instant it settles. `status`/`settled`/`pr` otherwise
+    behave exactly per LUD-21."""
+
+    status: Literal["OK"] = "OK"
+    settled: bool
+    preimage: str | None = None
+    pr: str
 
 
 class LnurlWithdrawResponse(BaseModel):

@@ -43,6 +43,12 @@ class Settings(BaseSettings):
 
     database_path: str = "mint.db"
 
+    # LUD-21 (optional): advertise a `verify` URL in /p/cb's response, so a
+    # wallet with no node of its own can poll whether its invoice settled.
+    # Off by default - see router.verify_invoice for why this mint never
+    # returns the spec's `preimage` field regardless of this setting.
+    verify_enabled: bool = False
+
     # the one-pager frontend (GET /)
     title: str = "lnurl-mint"
     description: str = "A minimal lnurlcash mint - pay the QR code to mint a Lightning bearer note."

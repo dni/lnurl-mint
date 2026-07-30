@@ -41,20 +41,33 @@ class NoteStore:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS mints ("
                 " payment_hash TEXT PRIMARY KEY,"
+                " pr TEXT NOT NULL,"  # LUD-21 verify only, never the secret
                 " amount_msat INTEGER NOT NULL,"
                 " minted INTEGER NOT NULL DEFAULT 0)"
             )
+            # a database from before LUD-21 verify has a `mints` table
+            # without `pr` - CREATE TABLE IF NOT EXISTS above is a no-op
+            # against it, and this mint has no other migration mechanism,
+            # so add the column by hand rather than tell an operator to
+            # delete their database (which holds real outstanding notes,
+            # not just disposable dev state). Existing rows predate `pr`
+            # entirely, so they get an empty one - they're pending mint
+            # invoices, not notes, and short-lived by nature.
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(mints)")}
+            if "pr" not in columns:
+                self._conn.execute("ALTER TABLE mints ADD COLUMN pr TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
         return self._conn
 
-    def create_mint(self, payment_hash: str, amount_msat: int) -> None:
+    def create_mint(self, payment_hash: str, pr: str, amount_msat: int) -> None:
         """Record an invoice whose preimage will become a bearer note worth
         `amount_msat` once the invoice settles (see settle_mint). Only the
-        payment hash is stored - the preimage reaches the buyer through the
-        Lightning payment itself."""
+        payment hash and the invoice itself (`pr`, for LUD-21 verify) are
+        stored - the preimage reaches the buyer through the Lightning
+        payment itself."""
         with self._lock, self.conn:
             self.conn.execute(
-                "INSERT INTO mints (payment_hash, amount_msat) VALUES (?, ?)", (payment_hash, amount_msat)
+                "INSERT INTO mints (payment_hash, pr, amount_msat) VALUES (?, ?, ?)", (payment_hash, pr, amount_msat)
             )
 
     def pending_mint(self, payment_hash: str) -> int | None:
@@ -63,6 +76,22 @@ class NoteStore:
             "SELECT amount_msat FROM mints WHERE payment_hash = ? AND minted = 0", (payment_hash,)
         ).fetchone()
         return row[0] if row else None
+
+    def mint_pr(self, payment_hash: str) -> str | None:
+        """The invoice `payment_hash` was minted from (LUD-21 verify's `pr`
+        field), or None if this mint never issued that payment_hash at all -
+        regardless of whether it has since settled or been spent."""
+        row = self.conn.execute("SELECT pr FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
+        return row[0] if row else None
+
+    def mint_settled(self, payment_hash: str) -> bool:
+        """Whether the mint invoice `payment_hash` has ever settled - for
+        LUD-21 verify, which must keep answering True even after the note
+        it produced is later rotated/split/merged/melted away (see
+        note_amount, which only answers "is there a spendable note *right
+        now*", a different question)."""
+        row = self.conn.execute("SELECT minted FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
+        return bool(row and row[0])
 
     def settle_mint(self, payment_hash: str) -> int | None:
         """Turn a settled mint invoice into an outstanding note - its id is

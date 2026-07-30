@@ -17,6 +17,7 @@ to a BOLT-11 payment.
 | `GET /`         | one-pager frontend: mint QR code (LNURL of `/p`), lightning address, node info |
 | `GET /p`      | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement)      |
 | `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid             |
+| `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb`      |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlp/{username}` | LUD-16 alias for `/p`, the mint is payable at `{USERNAME}@{BASE_URL host}` |
@@ -60,6 +61,20 @@ can actually produce. There's no separate setting for this: without a funding
 source, both fields are simply omitted, same as any other unconfigured
 optional field, and signing failures (e.g. a briefly unreachable node) are
 swallowed rather than failing the rotate/split/merge itself.
+
+**Verify** (optional, [LUD-21](../luds/21.md)): set `VERIFY_ENABLED=true` to
+advertise a `verify` URL in `/p/cb`'s response, letting a wallet with no node
+of its own poll `/verify/{payment_hash}` for settlement status instead of
+watching the invoice itself. Deviates from the spec in one deliberate way:
+the response never includes `preimage`, even when settled. LUD-21's own
+example response does return it, but for lnurlcash the preimage *is* the
+bearer note's spend secret (see LUD-XX) - a `payment_hash` is not secret (an
+invoice's own recipient can trivially derive it, and it may end up in logs,
+proxies, or a wallet's own history), so handing back the preimage here would
+let anyone who merely saw the invoice steal the note the instant it settles,
+racing whoever actually paid for it. `/verify/{payment_hash}` itself always
+works when hit directly; `VERIFY_ENABLED` only controls whether `/p/cb`
+advertises it.
 
 **Tor**: set `ONION_URL` to this mint's hidden service address (e.g.
 `http://<v3-address>.onion`) to advertise it on the frontend one-pager as an

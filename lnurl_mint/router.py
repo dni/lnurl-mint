@@ -10,7 +10,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from .config import settings
 from .db import notes
 from .error_handler import LnurlErrorResponseHandler
-from .models import LnurlPayActionResponse, LnurlPayResponse, LnurlWithdrawResponse, WithdrawSuccessResponse
+from .models import (
+    LnurlPayActionResponse,
+    LnurlPayResponse,
+    LnurlPayVerifyResponse,
+    LnurlWithdrawResponse,
+    WithdrawSuccessResponse,
+)
 from .node import LightningBackendConfig, create_invoice, is_invoice_settled, pay_invoice
 from .signing import mint_pubkey, sign_note
 
@@ -36,25 +42,37 @@ def _note_id(k1: str) -> str:
     return sha256(bytes.fromhex(k1)).hexdigest()
 
 
+async def _mint_settled(payment_hash: str) -> bool:
+    """Whether the mint invoice `payment_hash` has ever settled - checks
+    the funding source live and materializes the note (NoteStore.settle_mint)
+    the first time settlement is observed. Used both to lazily resolve a
+    note (see _note_amount_by_id) and by LUD-21 verify, which must keep
+    reporting True forever once settled, even after the resulting note is
+    later spent - unlike _note_amount_by_id, which answers a different
+    question ("is there a spendable note *right now*")."""
+    if notes.mint_settled(payment_hash):
+        return True
+    if notes.pending_mint(payment_hash) is None:
+        return False
+    funding_source = settings.funding_source()
+    if not funding_source.backend:
+        return False
+    if not await is_invoice_settled(payment_hash, funding_source):
+        return False
+    notes.settle_mint(payment_hash)
+    return True
+
+
 async def _note_amount_by_id(note_id: str) -> int | None:
-    """Value of the outstanding note with id `note_id`, or None. An id
-    without a note yet may be the payment hash of a settled-but-not-yet-
-    recorded mint invoice - per the spec, once payment settles the preimage
-    MUST be accepted as a bearer note, so check the funding source lazily
-    here."""
+    """Value of the outstanding note with id `note_id`, or None - either it
+    was never minted, or it has already been spent (rotated/split/merged/
+    melted away)."""
     amount_msat = notes.note_amount(note_id)
     if amount_msat is not None:
         return amount_msat
-    mint_amount_msat = notes.pending_mint(note_id)
-    if mint_amount_msat is None:
+    if not await _mint_settled(note_id):
         return None
-    funding_source = settings.funding_source()
-    if not funding_source.backend:
-        return None
-    if not await is_invoice_settled(note_id, funding_source):
-        return None
-    notes.settle_mint(note_id)
-    return mint_amount_msat
+    return notes.note_amount(note_id)
 
 
 async def _resolve_note(k1: str) -> tuple[str, int] | None:
@@ -103,10 +121,13 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
 
 
 @router.get("/p/cb", tags=["lnurlcash"])
-async def get_pay_callback(amount: int) -> LnurlPayActionResponse:
+async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
     """LUD-06 callback: returns an invoice for `amount` msat whose preimage
     this mint generated itself (see node.create_invoice) - once the invoice
-    settles, that preimage is an outstanding bearer note worth `amount`."""
+    settles, that preimage is an outstanding bearer note worth `amount`.
+
+    `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
+    no node of its own poll settlement status - see verify_invoice."""
     if amount < settings.min_sendable_msat:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Amount too low.")
     if amount > settings.max_sendable_msat:
@@ -116,11 +137,36 @@ async def get_pay_callback(amount: int) -> LnurlPayActionResponse:
         pr, preimage = await create_invoice(amount, funding_source)
     except Exception as exc:
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error creating invoice: {exc!s}")
-    # only the payment hash is stored - the preimage (the future bearer
-    # secret) reaches the buyer through the Lightning payment itself and is
-    # discarded here, per the spec's storing-hashes-not-secrets guidance
-    notes.create_mint(sha256(preimage).hexdigest(), amount)
-    return LnurlPayActionResponse(pr=pr)
+    # the preimage (the future bearer secret) reaches the buyer through the
+    # Lightning payment itself and is discarded here, per the spec's
+    # storing-hashes-not-secrets guidance - only the payment hash and the
+    # invoice itself (for LUD-21 verify) are stored
+    payment_hash = sha256(preimage).hexdigest()
+    notes.create_mint(payment_hash, pr, amount)
+    verify = str(req.url_for("verify_invoice", payment_hash=payment_hash)) if settings.verify_enabled else None
+    return LnurlPayActionResponse(pr=pr, verify=verify)
+
+
+@router.get("/verify/{payment_hash}", tags=["lnurlcash"])
+async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
+    """LUD-21: reports whether an invoice minted via /p/cb has settled -
+    looked up by payment_hash, unguessable but not itself secret, same as
+    any other LUD-21 verify. Works whenever hit directly, regardless of
+    VERIFY_ENABLED - that setting only controls whether /p/cb *advertises*
+    this URL, the same way LUD-21 implementations elsewhere in this
+    ecosystem treat their own verify toggle.
+
+    `preimage` is never populated, unlike the spec's example response: for
+    lnurlcash the preimage IS the bearer note's spend secret (see LUD-XX's
+    Minting a bearer note from a payRequest), so returning it here would
+    let anyone who merely knows the payment_hash - not proof of payment,
+    just having seen the invoice - steal the note the instant it settles,
+    racing whoever actually paid for it. `status`/`settled`/`pr` otherwise
+    behave exactly per LUD-21."""
+    pr = notes.mint_pr(payment_hash)
+    if pr is None:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
+    return LnurlPayVerifyResponse(settled=await _mint_settled(payment_hash), pr=pr)
 
 
 @router.get("/w", tags=["lnurlcash"])
