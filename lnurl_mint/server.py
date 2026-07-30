@@ -5,7 +5,9 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .config import settings
 from .frontend import frontend_router
+from .node import fetch_node_info
 from .router import router
 
 
@@ -28,6 +30,36 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # this module is imported but before requests are served - disabling
     # it at import time gets silently undone by that later reconfiguration.
     logging.getLogger("uvicorn.access").disabled = True
+
+    # a misconfigured or unreachable funding source degrades every
+    # funding-source-backed feature (minting, melting, LUD-XX offline
+    # verification) silently and per-request rather than failing outright
+    # (see signing.mint_pubkey/sign_note, router._funding_source) - that's
+    # the right behavior for a request, but an operator should still find
+    # out from the logs at boot, not from a wallet failing to mint hours
+    # later. This check is purely diagnostic: it changes no runtime
+    # behavior, and every route still probes the funding source fresh on
+    # its own.
+    funding_source = settings.funding_source()
+    if not funding_source.backend:
+        logging.warning(
+            "No funding source configured (FUNDINGSOURCE_BACKEND unset) - "
+            "minting, melting, and offline verification are all unavailable."
+        )
+    else:
+        try:
+            info = await fetch_node_info(funding_source)
+        except Exception as exc:
+            logging.warning(
+                f"Configured {funding_source.backend} funding source is unreachable at startup: {exc!s}. "
+                "Minting, melting, and offline verification will be unavailable until it responds."
+            )
+        else:
+            pubkey = info.uri.split("@")[0] if info.uri else "unknown pubkey"
+            logging.info(
+                f"Connected to {funding_source.backend} funding source: {info.alias or 'no alias'} ({pubkey})."
+            )
+
     yield
 
 
