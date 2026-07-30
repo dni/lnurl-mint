@@ -8,6 +8,7 @@ from bech32 import bech32_encode, convertbits
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+from . import __version__
 from .config import settings
 from .node import fetch_node_info
 
@@ -68,6 +69,10 @@ PAGE = Template(
   td:first-child { color: #9a978f; white-space: nowrap; padding-right: 1rem; }
   td.mono { font-family: ui-monospace, monospace; word-break: break-all; }
   .muted { color: #9a978f; font-size: .85rem; }
+  footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #2c303b;
+           font-size: .8rem; color: #9a978f; }
+  footer a { color: #9a978f; text-decoration: underline; }
+  footer a:hover { color: #e6e4dd; }
 </style>
 </head>
 <body>
@@ -85,6 +90,13 @@ PAGE = Template(
   $tor_section
   <h2>Node</h2>
   $node_section
+  <footer>
+    <a href="https://github.com/dni256/lnurl-mint" target="_blank" rel="noopener">GitHub</a>
+    &middot;
+    <a href="/docs">API docs</a>
+    &middot;
+    v$version
+  </footer>
 </main>
 <script>
   for (const el of document.querySelectorAll(".copy")) {
@@ -168,5 +180,6 @@ async def index(req: Request) -> HTMLResponse:
         address=html.escape(address),
         tor_section=_tor_section(base),
         node_section=await _node_section(),
+        version=html.escape(__version__),
     )
     return HTMLResponse(page)
