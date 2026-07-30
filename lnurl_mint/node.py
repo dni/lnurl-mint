@@ -10,6 +10,27 @@ import httpx
 from pydantic import BaseModel, SecretStr
 
 
+async def _raise_for_status(res: httpx.Response) -> None:
+    """Like httpx.Response.raise_for_status(), but folds the response body
+    into the exception message - lnd and cln both put the actual failure
+    reason there (e.g. cln's {"code": ..., "message": "Not permitted: ..."}
+    or a rune's rejection reason), which the bare httpx exception otherwise
+    discards, leaving only the status code visible in logs. Handles a
+    streamed response (see _pay_invoice_lnd) that hasn't been read yet -
+    safe to read fully here, since a non-2xx status means the caller was
+    never going to consume it as a stream anyway."""
+    if res.is_success:
+        return
+    try:
+        body = res.text
+    except httpx.ResponseNotRead:
+        body = (await res.aread()).decode(errors="replace")
+    try:
+        res.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise httpx.HTTPStatusError(f"{exc}: {body}", request=exc.request, response=exc.response) from exc
+
+
 class LightningBackendConfig(BaseModel):
     """This mint's own funding source backend and credentials (configured
     once by the operator - see config.Settings.funding_source). Only the
@@ -107,7 +128,7 @@ async def _create_invoice_lnd(
             headers={"Grpc-Metadata-macaroon": macaroon},
             json={"value_msat": str(amount_msat), "memo": memo, "r_preimage": b64encode(preimage).decode()},
         )
-        res.raise_for_status()
+        await _raise_for_status(res)
         payment_request = res.json().get("payment_request")
     if not payment_request:
         raise ValueError("lnd did not return a payment_request.")
@@ -129,7 +150,7 @@ async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: Lightn
                 "fee_limit_msat": str(_lnd_fee_limit_msat(invoice)),
             },
         ) as res:
-            res.raise_for_status()
+            await _raise_for_status(res)
             payment = None
             async for line in res.aiter_lines():
                 if not line.strip():
@@ -176,7 +197,7 @@ async def _sign_message_lnd(message: str, url: str, macaroon: str, config: Light
             headers={"Grpc-Metadata-macaroon": macaroon},
             json={"msg": b64encode(message.encode()).decode()},
         )
-        res.raise_for_status()
+        await _raise_for_status(res)
         signature_zbase32 = res.json().get("signature")
     if not signature_zbase32:
         raise ValueError("lnd did not return a signature.")
@@ -208,7 +229,7 @@ async def _create_invoice_cln(
                 "preimage": preimage.hex(),
             },
         )
-        res.raise_for_status()
+        await _raise_for_status(res)
         bolt11_str = res.json().get("bolt11")
     if not bolt11_str:
         raise ValueError("cln did not return a bolt11 invoice.")
@@ -218,7 +239,7 @@ async def _create_invoice_cln(
 async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningBackendConfig) -> bytes:
     async with httpx.AsyncClient(verify=config.verify, timeout=60.0) as client:
         res = await client.post(f"{url}/v1/pay", headers={"Rune": rune}, json={"bolt11": invoice})
-        res.raise_for_status()
+        await _raise_for_status(res)
         payment = res.json()
 
     if payment.get("status") != "complete":
@@ -238,7 +259,7 @@ async def _sign_message_cln(message: str, url: str, rune: str, config: Lightning
     its `zbase` field is the same lnd-compatible encoding, unused here."""
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.post(f"{url}/v1/signmessage", headers={"Rune": rune}, json={"message": message})
-        res.raise_for_status()
+        await _raise_for_status(res)
         result = res.json()
     signature_hex, recovery_id_hex = result.get("signature"), result.get("recid")
     if not signature_hex or recovery_id_hex is None:
@@ -251,7 +272,7 @@ async def _is_invoice_settled_lnd(payment_hash: str, url: str, macaroon: str, co
     hash directly in the path."""
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.get(f"{url}/v1/invoice/{payment_hash}", headers={"Grpc-Metadata-macaroon": macaroon})
-        res.raise_for_status()
+        await _raise_for_status(res)
         return bool(res.json().get("settled"))
 
 
@@ -259,7 +280,7 @@ async def _is_invoice_settled_cln(payment_hash: str, url: str, rune: str, config
     """Core Lightning's clnrest plugin listinvoices, filtered by payment_hash."""
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.post(f"{url}/v1/listinvoices", headers={"Rune": rune}, json={"payment_hash": payment_hash})
-        res.raise_for_status()
+        await _raise_for_status(res)
         invoices = res.json().get("invoices") or []
     return bool(invoices) and invoices[0].get("status") == "paid"
 
@@ -293,7 +314,7 @@ async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackend
     strings, empty when the node has no announced address configured."""
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.get(f"{url}/v1/getinfo", headers={"Grpc-Metadata-macaroon": macaroon})
-        res.raise_for_status()
+        await _raise_for_status(res)
         info = res.json()
     uris = info.get("uris") or []
     return NodeInfo(
@@ -308,7 +329,7 @@ async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConf
     """Core Lightning's clnrest plugin GetInfo."""
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.post(f"{url}/v1/getinfo", headers={"Rune": rune})
-        res.raise_for_status()
+        await _raise_for_status(res)
         info = res.json()
     node_id = info.get("id")
     uri = node_id
