@@ -94,7 +94,7 @@ typically already claims 8000. Override with `make run PORT=...`.
 Pull the published image (see [Release](#release)) or build it locally:
 
 ```sh
-docker pull dni/lnurl-mint          # or: make build
+docker pull dni256/lnurl-mint          # or: make build
 ```
 
 Run it standalone - a plain bridge network, `.env` for configuration (copy
@@ -107,7 +107,7 @@ docker run --restart always -d --name lnurl-mint \
   -p 8000:8000 \
   --env-file .env \
   -v "$(pwd)/data/mint.db:/app/mint.db" \
-  dni/lnurl-mint
+  dni256/lnurl-mint
 ```
 
 The container always listens on `8000` internally - map it to whichever host
@@ -138,7 +138,7 @@ uv run pytest
 Pushing a `v*` tag (`git tag v1.2.0 && git push origin v1.2.0`) triggers
 `.github/workflows/release.yml`, which:
 
-* builds the image and pushes `dni/lnurl-mint` to Docker Hub, tagged `1.2.0`,
+* builds the image and pushes `dni256/lnurl-mint` to Docker Hub, tagged `1.2.0`,
   `1.2`, `1`, and `latest`
 * creates a GitHub Release for the tag (via `gh release create
   --generate-notes`), with notes auto-generated from the commits/PRs merged
