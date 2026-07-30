@@ -23,12 +23,16 @@ COPY lnurl_mint/ ./lnurl_mint/
 
 ENV FORWARDED_ALLOW_IPS=*
 ENV PATH="/app/.venv/bin:${PATH}"
+# overridable at `docker run -e PORT=...` - with --network host (see the
+# Makefile's `run` target) there's no docker -p mapping to remap a port
+# with, so the app itself must listen on whatever port the host expects.
+# 8111, matching the Makefile's own default (not 8000, which a full
+# lnurl_server instance on the same host typically already claims)
+ENV PORT=8111
 
 # runtime settings (see lnurl_mint/config.py) are read from real
 # environment variables - pass them with `docker run --env-file .env`
-# (see .env.example for what's available), no file needs copying in.
-# always 8000 internally - map to whatever host port you want with
-# `docker run -p <host-port>:8000` (see the Makefile's own PORT for that)
-EXPOSE 8000
+# (see .env.example for what's available), no file needs copying in
+EXPOSE 8111
 
-CMD ["fastapi", "run", "lnurl_mint/server.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "fastapi run lnurl_mint/server.py --host 0.0.0.0 --port ${PORT}"]

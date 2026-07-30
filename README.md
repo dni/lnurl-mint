@@ -111,33 +111,39 @@ Pull the published image (see [Release](#release)) or build it locally:
 docker pull dni256/lnurl-mint          # or: make build
 ```
 
-Run it standalone - a plain bridge network, `.env` for configuration (copy
-`.env.example` and fill it in), and a bind-mounted file so the sqlite
-database survives container restarts:
+`make build`/`make run` (or the equivalent `docker run` below) use
+`--network host`, so the container shares the host's network namespace
+directly - `FUNDINGSOURCE_URL=https://localhost:3010` in `.env` then reaches
+a node running on the host exactly like a bare `make dev`/`make serve` would,
+with no `host.docker.internal`/gateway-IP workaround needed. The tradeoff is
+the usual one for host networking: no port remapping (the app listens on
+`PORT` directly, see below) and no network isolation from the host.
 
 ```sh
 mkdir -p data && touch data/mint.db
 docker run --restart always -d --name lnurl-mint \
-  -p 8000:8000 \
+  --network host \
+  -e PORT=8111 \
   --env-file .env \
   -v "$(pwd)/data/mint.db:/app/mint.db" \
   dni256/lnurl-mint
 ```
 
-The container always listens on `8000` internally - map it to whichever host
-port you want via `-p <host-port>:8000`. `FUNDINGSOURCE_CERT_PATH`, if you set
-one, must point at a path that exists *inside* the container - if your lnd/cln
-cert lives on the host, bind-mount it in too (`-v /host/path/tls.cert:/tls.cert:ro`
-and point `FUNDINGSOURCE_CERT_PATH=/tls.cert` at the mounted path).
+`PORT` (baked into the image as `ENV PORT=8111`, overridable at `docker run
+-e PORT=...`) is what the app itself listens on - with `--network host` there's
+no `-p host:container` mapping to remap a port with, so this is the only way
+to choose it. `FUNDINGSOURCE_CERT_PATH`, if you set one, must point at a path
+that exists *inside* the container - if your lnd/cln cert lives on the host,
+bind-mount it in too (`-v /host/path/tls.cert:/tls.cert:ro` and point
+`FUNDINGSOURCE_CERT_PATH=/tls.cert` at the mounted path).
 
-`make build`/`make run` wrap exactly the recipe above (same plain bridge
-network, same `.env`, same volume) - `make run PORT=...` just picks which
-host port it's published on, defaulting to 8111 (see `make dev`'s docstring
-above for why). If your funding source lives on another Docker network (e.g.
-a sibling `lnurl_server` checkout's regtest stack) or needs a TLS cert that
-only exists on the host, add your own `--network`/`-v` flags to the `docker
-run` in the Makefile, or run the command directly instead. Front it with a
-reverse proxy for TLS if it's reachable from the internet.
+`make build`/`make run` wrap exactly the recipe above (same `.env`, same
+volume) - `make run PORT=...` picks the port, defaulting to 8111 (see `make
+dev`'s docstring above for why). Prefer real network isolation instead (e.g.
+deploying where the funding source is reachable over the network rather than
+on `localhost`)? Drop `--network host` and use `-p <host-port>:8111` instead,
+same as any other container. Front it with a reverse proxy for TLS if it's
+reachable from the internet.
 
 ## Test
 

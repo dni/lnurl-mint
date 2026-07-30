@@ -52,7 +52,8 @@ run:
 	mkdir -p data
 	touch data/mint.db
 	docker run --restart always -d --name $(CONTAINER_NAME) \
-		-p $(PORT):8000 \
+		--network host \
+		-e PORT=$(PORT) \
 		$(if $(ENV_FILE),--env-file $(ENV_FILE),) \
 		-v $(PWD)/data/mint.db:/app/mint.db \
 		$(IMAGE_NAME)
