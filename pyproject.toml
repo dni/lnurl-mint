@@ -13,7 +13,8 @@ dependencies = [
   "pydantic-settings>=2.0,<3.0",
   "qrcode>=8.2",
   "bech32>=1.2.0",
-  "coincurve>=20.0.0",
+  "coincurve>=21.0.0",
+  "websockets>=13.0",
 ]
 
 [dependency-groups]

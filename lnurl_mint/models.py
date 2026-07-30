@@ -51,7 +51,14 @@ class LnurlWithdrawResponse(BaseModel):
 
     `mintPubkey` (LUD-XX Offline verification, optional) is this mint's
     signing key - omitted entirely if no funding source is configured
-    (see signing.mint_pubkey)."""
+    (see signing.mint_pubkey).
+
+    The NORD fields (all optional, see nostr.py): `nostrPubkey` is the
+    dedicated key this mint signs asset events with (x-only, BIP-340);
+    `asset` is [genesis event id, relay hint] when this note IS an asset;
+    `artwork` mirrors the genesis artwork commitment as [url, sha256] so
+    a wallet without a nostr client renders the card in one round trip -
+    bytes served anywhere MUST hash to the committed value."""
 
     tag: Literal["withdrawRequest"] = "withdrawRequest"
     callback: str
@@ -60,6 +67,9 @@ class LnurlWithdrawResponse(BaseModel):
     maxWithdrawable: int
     defaultDescription: str = ""
     mintPubkey: str | None = None
+    nostrPubkey: str | None = None
+    asset: list[str] | None = None
+    artwork: list[str] | None = None
 
 
 class WithdrawSuccessResponse(BaseModel):

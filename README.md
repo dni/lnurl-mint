@@ -89,6 +89,34 @@ scope - point a Tor `HiddenServiceDir` (or an onion-services-capable reverse
 proxy) at whatever host/port this mint is already listening on, the same way
 you'd front it with Caddy/nginx for clearnet.
 
+## NORD asset layer (optional)
+
+Notes can be **assets** - nostr ordinals over lnurlcash, per the
+[NORD drafts](https://github.com/BIMbeamFLX/nostr-ordinals): a unique,
+indivisible note (a trading card, a ticket, a numbered banknote) whose
+birth, custody hops and death this mint publishes as a hash-linked chain
+of signed nostr events, with artwork content-addressed by sha256.
+
+Set `NOSTR_SECRET_KEY` (a dedicated 32-byte-hex nostr key - note
+signatures come from the funding source node's signmessage RPC, but a
+nostr event needs a raw BIP-340 signature no such RPC can produce, so
+asset events use this key, advertised as `nostrPubkey` on the
+withdrawRequest) and `NOSTR_RELAYS`, then queue pre-committed assets:
+
+```sh
+uv run python -m lnurl_mint.assets import set.json
+```
+
+The next mint invoice settling for exactly an asset's value claims it: a
+genesis event (kind `7600`, `birth` = the invoice's payment hash) goes to
+the relays via a durable outbox, the withdrawRequest gains
+`asset: [genesis id, relay]` and `artwork: [url, sha256]`, rotating the
+note records a transfer (`7601`, with the receiver's npub iff they
+disclosed one via the callback's `claimer` param), melting closes the
+chain (`7603`). Asset notes refuse split and merge - an ordinal is
+indivisible. Without the key, everything here is dormant and notes are
+plain cash, exactly as before.
+
 ## Run
 
 ```sh

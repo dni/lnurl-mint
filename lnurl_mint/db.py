@@ -36,7 +36,8 @@ class NoteStore:
                 "CREATE TABLE IF NOT EXISTS notes ("
                 " id TEXT PRIMARY KEY,"  # sha256(k1), never the secret itself
                 " amount_msat INTEGER NOT NULL,"
-                " spent INTEGER NOT NULL DEFAULT 0)"
+                " spent INTEGER NOT NULL DEFAULT 0,"
+                " asset TEXT)"  # NORD: genesis event id, NULL for plain cash
             )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS mints ("
@@ -45,6 +46,29 @@ class NoteStore:
                 " amount_msat INTEGER NOT NULL,"
                 " minted INTEGER NOT NULL DEFAULT 0)"
             )
+            # NORD (see nostr.py): pre-committed assets waiting to be born
+            # (genesis_id NULL = still queued), and the outbox of chain
+            # events awaiting a relay. `tip` is the asset's current chain
+            # head - the mint MUST never sign two children of one tip, and
+            # persisting it here is what enforces that across restarts.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS assets ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " content TEXT NOT NULL,"
+                " artwork_url TEXT,"
+                " artwork_sha256 TEXT,"
+                " collection TEXT,"
+                " amount_msat INTEGER NOT NULL,"
+                " genesis_id TEXT,"
+                " tip TEXT,"
+                " note_id TEXT)"
+            )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS events ("
+                " id TEXT PRIMARY KEY,"
+                " json TEXT NOT NULL,"
+                " published INTEGER NOT NULL DEFAULT 0)"
+            )
             # a database from before LUD-21 verify has a `mints` table
             # without `pr` - CREATE TABLE IF NOT EXISTS above is a no-op
             # against it, and this mint has no other migration mechanism,
@@ -52,10 +76,15 @@ class NoteStore:
             # delete their database (which holds real outstanding notes,
             # not just disposable dev state). Existing rows predate `pr`
             # entirely, so they get an empty one - they're pending mint
-            # invoices, not notes, and short-lived by nature.
+            # invoices, not notes, and short-lived by nature. Same story
+            # for `notes.asset`, which predates the NORD layer: existing
+            # notes are plain cash, so NULL is exactly right for them.
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(mints)")}
             if "pr" not in columns:
                 self._conn.execute("ALTER TABLE mints ADD COLUMN pr TEXT NOT NULL DEFAULT ''")
+            note_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(notes)")}
+            if "asset" not in note_columns:
+                self._conn.execute("ALTER TABLE notes ADD COLUMN asset TEXT")
             self._conn.commit()
         return self._conn
 
@@ -121,18 +150,35 @@ class NoteStore:
         the only time they ever exist on this side; only their hashes are
         stored. Raises ValueError - burning and minting nothing - if any id
         is unknown, already spent, or repeated (the second burn of a
-        duplicate finds it spent by the first)."""
+        duplicate finds it spent by the first).
+
+        An asset rides its note's lineage (NORD): when the single burned
+        note carries one, the single minted note inherits it - the router
+        guards that an asset note only ever reaches here as a rotate or a
+        melt, and the shape check below is defense in depth, not policy."""
         new_k1s = [urandom(32).hex() for _ in mint_amounts]
         with self._lock:
             try:
                 with self.conn:
+                    assets: list[str] = []
                     for note_id in burn_ids:
+                        row = self.conn.execute("SELECT asset FROM notes WHERE id = ?", (note_id,)).fetchone()
+                        if row and row[0]:
+                            assets.append(row[0])
                         cursor = self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ? AND spent = 0", (note_id,))
                         if cursor.rowcount != 1:
                             raise ValueError("Invalid or already spent k1.")
+                    if assets and (len(burn_ids) != 1 or len(mint_amounts) > 1):
+                        raise ValueError("An asset note cannot be split or merged.")
+                    carried = assets[0] if assets and mint_amounts else None
                     for k1, amount_msat in zip(new_k1s, mint_amounts):
                         note_id = sha256(bytes.fromhex(k1)).hexdigest()
-                        self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
+                        self.conn.execute(
+                            "INSERT INTO notes (id, amount_msat, asset) VALUES (?, ?, ?)",
+                            (note_id, amount_msat, carried),
+                        )
+                        if carried:
+                            self.conn.execute("UPDATE assets SET note_id = ? WHERE genesis_id = ?", (note_id, carried))
             except sqlite3.Error as exc:
                 raise ValueError(f"Note swap failed: {exc!s}") from exc
         return new_k1s
@@ -143,6 +189,94 @@ class NoteStore:
         with self._lock, self.conn:
             for note_id in note_ids:
                 self.conn.execute("UPDATE notes SET spent = 0 WHERE id = ?", (note_id,))
+
+    # ---- NORD assets (see nostr.py for the event side) ----
+
+    def queue_asset(
+        self,
+        content: str,
+        artwork_url: str | None,
+        artwork_sha256: str | None,
+        collection: str | None,
+        amount_msat: int,
+    ) -> None:
+        """Pre-commit an asset: the next mint invoice settling for exactly
+        `amount_msat` claims it (claim_asset) and a genesis is published.
+        Queued in insertion order - a booster box, not a lottery."""
+        with self._lock, self.conn:
+            self.conn.execute(
+                "INSERT INTO assets (content, artwork_url, artwork_sha256, collection, amount_msat)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (content, artwork_url, artwork_sha256, collection, amount_msat),
+            )
+
+    def claim_asset(self, note_id: str, amount_msat: int) -> tuple[int, str, str | None, str | None, str | None] | None:
+        """Bind the oldest still-queued asset of exactly `amount_msat` to
+        the freshly settled note `note_id` - (rowid, content, artwork_url,
+        artwork_sha256, collection), or None when nothing queued matches
+        (the mint is then plain cash, exactly as before)."""
+        with self._lock, self.conn:
+            row = self.conn.execute(
+                "SELECT id, content, artwork_url, artwork_sha256, collection FROM assets"
+                " WHERE genesis_id IS NULL AND amount_msat = ? ORDER BY id LIMIT 1",
+                (amount_msat,),
+            ).fetchone()
+            if row is None:
+                return None
+            self.conn.execute("UPDATE assets SET note_id = ? WHERE id = ?", (note_id, row[0]))
+            return row
+
+    def bind_genesis(self, asset_rowid: int, genesis_id: str, note_id: str) -> None:
+        """Finalize a claim: the asset now IS `genesis_id` (its chain tip
+        starts there) and the note carries it."""
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE assets SET genesis_id = ?, tip = ? WHERE id = ?", (genesis_id, genesis_id, asset_rowid)
+            )
+            self.conn.execute("UPDATE notes SET asset = ? WHERE id = ?", (genesis_id, note_id))
+
+    def note_asset(self, note_id: str) -> str | None:
+        """The genesis event id of the asset the note carries, or None for
+        plain cash."""
+        row = self.conn.execute("SELECT asset FROM notes WHERE id = ?", (note_id,)).fetchone()
+        return row[0] if row and row[0] else None
+
+    def asset_artwork(self, genesis_id: str) -> tuple[str, str] | None:
+        """(url, sha256) of the asset's artwork - the withdrawRequest's
+        `artwork` mirror of the genesis commitment - or None if the asset
+        was queued without one."""
+        row = self.conn.execute(
+            "SELECT artwork_url, artwork_sha256 FROM assets WHERE genesis_id = ?", (genesis_id,)
+        ).fetchone()
+        return (row[0], row[1]) if row and row[0] and row[1] else None
+
+    def asset_tip(self, genesis_id: str) -> str | None:
+        """The asset's current chain head - the `prev` of its next event."""
+        row = self.conn.execute("SELECT tip FROM assets WHERE genesis_id = ?", (genesis_id,)).fetchone()
+        return row[0] if row and row[0] else None
+
+    def advance_tip(self, genesis_id: str, event_id: str) -> None:
+        """Move the chain head after enqueueing a transfer/melt - one
+        rotate, one link, never two children of the same tip."""
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE assets SET tip = ? WHERE genesis_id = ?", (event_id, genesis_id))
+
+    # ---- NORD event outbox (drained by nostr.publish_outbox_forever) ----
+
+    def enqueue_event(self, event_id: str, event_json: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO events (id, json) VALUES (?, ?)", (event_id, event_json))
+
+    def unpublished_events(self, limit: int = 50) -> list[tuple[str, str]]:
+        """Oldest-first (id, json) still awaiting a relay's OK."""
+        rows = self.conn.execute(
+            "SELECT id, json FROM events WHERE published = 0 ORDER BY rowid LIMIT ?", (limit,)
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def mark_event_published(self, event_id: str) -> None:
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE events SET published = 1 WHERE id = ?", (event_id,))
 
 
 notes = NoteStore(settings.database_path)

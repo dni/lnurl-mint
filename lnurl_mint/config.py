@@ -69,6 +69,23 @@ class Settings(BaseSettings):
     # LUD-16: the mint is payable at {username}@{base_url host}
     username: str = "mint"
 
+    # NORD (nostr ordinals, optional - see nostr.py): this mint's own
+    # nostr signing key, 32 bytes hex. Note signatures (signing.py) are
+    # delegated to the funding source node's signmessage RPC, but a nostr
+    # event needs a raw BIP-340 signature no such RPC can produce - so
+    # asset events are signed with this dedicated key instead, advertised
+    # as `nostrPubkey` on the withdrawRequest. Unset = the whole asset
+    # layer is dormant: notes are plain lnurlcash, exactly as before.
+    nostr_secret_key: SecretStr | None = None
+    # comma-separated relay URLs (wss://...) the outbox publisher drains
+    # to - the first one doubles as the relay hint inside asset pointers
+    nostr_relays: str | None = None
+
+    def relay_list(self) -> list[str]:
+        if not self.nostr_relays:
+            return []
+        return [relay.strip() for relay in self.nostr_relays.split(",") if relay.strip()]
+
     def public_base_url(self, request_base_url: str) -> str:
         if self.onion_url:
             request_host = urlparse(request_base_url).hostname or ""

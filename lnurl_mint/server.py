@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -8,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .frontend import frontend_router
 from .node import fetch_node_info
+from .nostr import nostr_pubkey, nostr_secret, publish_outbox_forever
 from .router import router
 
 
@@ -60,7 +62,24 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                 f"Connected to {funding_source.backend} funding source: {info.alias or 'no alias'} ({pubkey})."
             )
 
+    # NORD (optional, see nostr.py): asset events are written to a durable
+    # outbox by the note operations themselves; this background task is
+    # only their way out to the relays. Key without relays still mints
+    # assets and grows the outbox - warned, since that's usually half a
+    # configuration - and no key means the layer is dormant entirely.
+    publisher: asyncio.Task | None = None
+    if nostr_secret() is not None and settings.relay_list():
+        publisher = asyncio.create_task(publish_outbox_forever())
+        logging.info(
+            f"NORD asset layer active: publishing as {nostr_pubkey()} to {len(settings.relay_list())} relay(s)."
+        )
+    elif nostr_secret() is not None:
+        logging.warning("NOSTR_SECRET_KEY is set but NOSTR_RELAYS is empty - asset events will queue unpublished.")
+
     yield
+
+    if publisher is not None:
+        publisher.cancel()
 
 
 app = FastAPI(

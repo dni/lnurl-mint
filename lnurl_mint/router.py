@@ -18,6 +18,7 @@ from .models import (
     WithdrawSuccessResponse,
 )
 from .node import LightningBackendConfig, create_invoice, is_invoice_settled, is_payment_complete, pay_invoice
+from .nostr import KIND_MELT, KIND_TRANSFER, chain_event, genesis_event, nostr_pubkey, nostr_secret, relay_hint
 from .signing import mint_pubkey, sign_note
 
 router = APIRouter()
@@ -59,8 +60,47 @@ async def _mint_settled(payment_hash: str) -> bool:
         return False
     if not await is_invoice_settled(payment_hash, funding_source):
         return False
-    notes.settle_mint(payment_hash)
+    amount_msat = notes.settle_mint(payment_hash)
+    if amount_msat is not None:
+        _assign_queued_asset(payment_hash, amount_msat)
     return True
+
+
+def _assign_queued_asset(note_id: str, amount_msat: int) -> None:
+    """NORD (see nostr.py): a freshly settled mint claims the oldest queued
+    asset of its exact value - genesis built, bound, enqueued for the
+    outbox publisher. No nostr key configured, or nothing queued at this
+    value, and the note is plain cash, exactly as before. The genesis
+    `birth` tag is the settled invoice's payment hash, which IS `note_id`
+    here (k1 being the preimage)."""
+    key = nostr_secret()
+    if key is None:
+        return
+    claimed = notes.claim_asset(note_id, amount_msat)
+    if claimed is None:
+        return
+    rowid, content, artwork_url, artwork_sha256, collection = claimed
+    event = genesis_event(key, note_id, amount_msat, content, artwork_url, artwork_sha256, collection)
+    notes.bind_genesis(rowid, event["id"], note_id)
+    notes.enqueue_event(event["id"], json.dumps(event, separators=(",", ":"), ensure_ascii=False))
+
+
+def _record_chain_event(asset_ids: list[str], kind: int, claimer: str | None = None) -> None:
+    """NORD: one chain link per asset operation - a transfer (7601) on
+    rotate, a melt (7603) on payout - and the tip moves with it: one
+    burned secret, one link, never two children of the same tip. Never
+    blocks or fails the note operation; a mint holding asset notes but
+    running without NOSTR_SECRET_KEY simply leaves the chain unwritten."""
+    if not asset_ids:
+        return
+    key = nostr_secret()
+    if key is None:
+        return
+    for genesis_id in asset_ids:
+        prev = notes.asset_tip(genesis_id) or genesis_id
+        event = chain_event(key, kind, genesis_id, prev, claimer)
+        notes.enqueue_event(event["id"], json.dumps(event, separators=(",", ":"), ensure_ascii=False))
+        notes.advance_tip(genesis_id, event["id"])
 
 
 async def _note_amount_by_id(note_id: str) -> int | None:
@@ -193,8 +233,12 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
     resolved = await _resolve_note(k1)
     if resolved is None:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown or already spent note.")
-    _, amount_msat = resolved
+    note_id, amount_msat = resolved
     callback = str(req.url_for("get_withdraw_callback"))
+    # NORD: an asset note carries its genesis pointer and the artwork
+    # mirror; plain cash notes carry neither (all fields None-excluded)
+    asset_genesis = notes.note_asset(note_id)
+    artwork = notes.asset_artwork(asset_genesis) if asset_genesis else None
     return LnurlWithdrawResponse(
         callback=callback,
         k1=k1,
@@ -202,12 +246,15 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
         maxWithdrawable=amount_msat,
         defaultDescription=f"lnurlcash bearer note on {req.url.hostname}",
         mintPubkey=await mint_pubkey(settings.funding_source()),
+        nostrPubkey=nostr_pubkey(),
+        asset=[asset_genesis, relay_hint()] if asset_genesis else None,
+        artwork=list(artwork) if artwork else None,
     )
 
 
 @router.get("/w/cb", tags=["lnurlcash"])
 async def get_withdraw_callback(
-    k1: list[str] = Query(...), pr: str | None = None, amount: int | None = None
+    k1: list[str] = Query(...), pr: str | None = None, amount: int | None = None, claimer: str | None = None
 ) -> WithdrawSuccessResponse:
     """The lnurlcash callback - LUD-03 melt semantics, extended:
 
@@ -225,11 +272,21 @@ async def get_withdraw_callback(
     here (never on melt, which mints nothing) is signed per LUD-XX's
     Offline verification, by the funding source node's own key - see
     signing.sign_note; the fields are simply omitted if no funding source
-    is configured or signing fails for any other reason."""
+    is configured or signing fails for any other reason.
+
+    NORD additions (asset notes only, see nostr.py): split and merge are
+    rejected - an ordinal is indivisible - so an asset only ever rotates
+    (chain gains a transfer, 7601) or melts (chain closes, 7603). A
+    rotating receiver MAY disclose an npub via `claimer` to be named in
+    the transfer's `p` tag; without it the hop is recorded ownerless."""
     if pr is not None and (len(k1) > 1 or amount is not None):
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, "pr cannot be combined with multiple k1s or amount - merge or split first."
         )
+    # claimer is a nostr pubkey in x-only hex - the same 32-bytes-hex shape
+    # as a k1, so the one pattern serves both
+    if claimer is not None and not K1_PATTERN.match(claimer):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "claimer must be a 32-byte hex nostr pubkey.")
 
     note_ids: list[str] = []
     values: list[int] = []
@@ -240,6 +297,12 @@ async def get_withdraw_callback(
         note_ids.append(resolved[0])
         values.append(resolved[1])
     total_msat = sum(values)
+
+    asset_ids = [asset for asset in (notes.note_asset(note_id) for note_id in note_ids) if asset]
+    if asset_ids and amount is not None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "An asset note cannot be split - an ordinal is indivisible.")
+    if asset_ids and len(k1) > 1:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Asset notes cannot be merged.")
 
     if pr is not None:
         try:
@@ -273,6 +336,8 @@ async def get_withdraw_callback(
             if not completed:
                 notes.restore(note_ids)
                 raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+        # the asset's charge is paid out - the chain closes (NORD melt)
+        _record_chain_event(asset_ids, KIND_MELT)
         return WithdrawSuccessResponse()
 
     if amount is not None:
@@ -290,4 +355,7 @@ async def get_withdraw_callback(
         )
 
     (new_k1,) = notes.swap(note_ids, [total_msat])
+    # custody moved (NORD transfer) - the asset rode the swap, the chain
+    # records the hop, `claimer` names the receiver iff one was disclosed
+    _record_chain_event(asset_ids, KIND_TRANSFER, claimer)
     return WithdrawSuccessResponse(k1=new_k1, signature=await sign_note(new_k1, total_msat, settings.funding_source()))
