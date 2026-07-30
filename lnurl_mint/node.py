@@ -4,6 +4,7 @@ from base64 import b64decode, b64encode
 from hashlib import sha256
 from os import urandom
 from typing import Literal
+from urllib.parse import quote
 
 import bolt11
 import httpx
@@ -73,6 +74,25 @@ async def pay_invoice(invoice: str, config: LightningBackendConfig) -> bytes:
             raise ValueError("Rune is required.")
         return await _pay_invoice_cln(invoice, config.url, config.rune.get_secret_value(), config)
     raise ValueError(f"pay_invoice is not supported for backend {config.backend!r}.")
+
+
+async def is_payment_complete(payment_hash: str, config: LightningBackendConfig) -> bool:
+    """Whether an outgoing payment this mint sent (via pay_invoice) actually
+    completed - checked independently of whatever pay_invoice's own call
+    returned. A melt that raises (timeout, dropped connection, ...) after
+    the underlying payment already went through must not be treated as a
+    failure: the caller could otherwise retry with a *different* invoice
+    and get the same note's value paid out twice (see router.py's melt
+    path, the only caller)."""
+    if config.backend == "lnd":
+        if not config.url or not config.macaroon:
+            raise ValueError("Macaroon is required.")
+        return await _is_payment_complete_lnd(payment_hash, config.url, config.macaroon.get_secret_value(), config)
+    if config.backend == "cln":
+        if not config.url or not config.rune:
+            raise ValueError("Rune is required.")
+        return await _is_payment_complete_cln(payment_hash, config.url, config.rune.get_secret_value(), config)
+    raise ValueError(f"is_payment_complete is not supported for backend {config.backend!r}.")
 
 
 async def sign_message(message: str, config: LightningBackendConfig) -> tuple[bytes, int]:
@@ -172,6 +192,35 @@ async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: Lightn
     return preimage
 
 
+async def _is_payment_complete_lnd(payment_hash: str, url: str, macaroon: str, config: LightningBackendConfig) -> bool:
+    """lnd's REST TrackPaymentV2 - streams updates for a payment by hash,
+    including ones already resolved before this call (lnd retains payment
+    records permanently), so the first event is already the terminal one.
+    Unlike r_hash_str elsewhere in this file, this path parameter is
+    base64 (grpc-gateway's convention for a raw `bytes` field), not hex -
+    a hex string of the same length is silently mis-decoded instead of
+    rejected outright. A payment lnd never attempted at all is a 404, not
+    a stream."""
+    hash_b64 = quote(b64encode(bytes.fromhex(payment_hash)).decode(), safe="")
+    async with httpx.AsyncClient(verify=config.verify, timeout=10.0) as client:
+        async with client.stream(
+            "GET",
+            f"{url}/v2/router/track/{hash_b64}",
+            headers={"Grpc-Metadata-macaroon": macaroon},
+            params={"no_inflight_updates": "true"},
+        ) as res:
+            if res.status_code == 404:
+                return False
+            await _raise_for_status(res)
+            async for line in res.aiter_lines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                payment = event.get("result", event)
+                return payment.get("status") == "SUCCEEDED"
+    return False
+
+
 def _lnd_fee_limit_msat(invoice: str) -> int:
     amount_msat = bolt11.decode(invoice).amount_msat or 0
     # mirrors cln's pay defaults (0.5% maxfeepercent, 5000 msat exemptfee floor)
@@ -251,6 +300,17 @@ async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningB
     preimage = _decode_hex_or_base64(preimage_hex)
     _verify_preimage(preimage, invoice)
     return preimage
+
+
+async def _is_payment_complete_cln(payment_hash: str, url: str, rune: str, config: LightningBackendConfig) -> bool:
+    """Core Lightning's clnrest plugin listpays, filtered by payment_hash -
+    an unattempted or unknown one just comes back as an empty list, not
+    an error."""
+    async with httpx.AsyncClient(verify=config.verify) as client:
+        res = await client.post(f"{url}/v1/listpays", headers={"Rune": rune}, json={"payment_hash": payment_hash})
+        await _raise_for_status(res)
+        pays = res.json().get("pays") or []
+    return bool(pays) and pays[0].get("status") == "complete"
 
 
 async def _sign_message_cln(message: str, url: str, rune: str, config: LightningBackendConfig) -> tuple[bytes, int]:

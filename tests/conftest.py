@@ -49,6 +49,12 @@ class FakeNode:
         self.last_preimage: bytes = b""
         self.paid: list[str] = []
         self.fail_payments = False
+        # for simulating an *ambiguous* pay_invoice failure - the funding
+        # source secretly completed the payment despite pay_invoice raising
+        # (e.g. the response was lost) - vs. the confirmation check itself
+        # being unable to tell either way
+        self.payment_actually_completed = False
+        self.is_payment_complete_raises = False
         # a real keypair, standing in for the node's own identity key - lets
         # tests of LUD-XX Offline verification (signing.mint_pubkey/
         # sign_note) exercise the real "Lightning Signed Message" signing
@@ -73,6 +79,11 @@ class FakeNode:
         self.paid.append(invoice)
         return urandom(32)
 
+    async def is_payment_complete(self, payment_hash: str, config) -> bool:
+        if self.is_payment_complete_raises:
+            raise ConnectionError("funding source unreachable")
+        return self.payment_actually_completed
+
     async def fetch_node_info(self, config) -> NodeInfo:
         return NodeInfo(alias="fakenode", uri=f"{self.pubkey}@127.0.0.1:9735", num_channels=3, num_peers=5)
 
@@ -91,6 +102,7 @@ def node(monkeypatch: pytest.MonkeyPatch) -> FakeNode:
     monkeypatch.setattr(router_module, "create_invoice", fake.create_invoice)
     monkeypatch.setattr(router_module, "is_invoice_settled", fake.is_invoice_settled)
     monkeypatch.setattr(router_module, "pay_invoice", fake.pay_invoice)
+    monkeypatch.setattr(router_module, "is_payment_complete", fake.is_payment_complete)
     monkeypatch.setattr(frontend_module, "fetch_node_info", fake.fetch_node_info)
     monkeypatch.setattr(signing_module, "fetch_node_info", fake.fetch_node_info)
     monkeypatch.setattr(signing_module, "sign_message", fake.sign_message)

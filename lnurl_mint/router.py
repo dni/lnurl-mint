@@ -17,7 +17,7 @@ from .models import (
     LnurlWithdrawResponse,
     WithdrawSuccessResponse,
 )
-from .node import LightningBackendConfig, create_invoice, is_invoice_settled, pay_invoice
+from .node import LightningBackendConfig, create_invoice, is_invoice_settled, is_payment_complete, pay_invoice
 from .signing import mint_pubkey, sign_note
 
 router = APIRouter()
@@ -250,13 +250,29 @@ async def get_withdraw_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invoice must be for exactly {total_msat} msat.")
         funding_source = _funding_source()
         # burn first so a concurrent request can't double-spend while the
-        # payment is in flight; a failed payment restores the notes intact
+        # payment is in flight; a failed payment restores the notes intact.
+        # But "failed" must mean *confirmed* failed: pay_invoice can raise
+        # after the funding source already completed the payment (a
+        # dropped connection, a timeout on our side while it was still
+        # in flight, ...), and blindly restoring on any exception would
+        # let the caller retry with a *different* invoice and get this
+        # same value paid out twice. So a raise here only restores once
+        # the funding source itself confirms the payment did NOT go
+        # through - if even that check fails, the notes stay burned
+        # rather than risk restoring a payment that actually succeeded.
         notes.swap(note_ids, [])
         try:
             await pay_invoice(pr, funding_source)
         except Exception as exc:
-            notes.restore(note_ids)
-            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+            if not decoded.has_payment_hash:
+                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+            try:
+                completed = await is_payment_complete(decoded.payment_hash, funding_source)
+            except Exception:
+                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}") from exc
+            if not completed:
+                notes.restore(note_ids)
+                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
         return WithdrawSuccessResponse()
 
     if amount is not None:

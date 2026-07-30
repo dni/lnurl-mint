@@ -113,6 +113,35 @@ def test_failed_payment_restores_the_notes(client: TestClient, node: FakeNode, m
     assert note_value(client, k1) == 5000
 
 
+def test_ambiguously_failed_payment_that_actually_succeeded_does_not_restore(
+    client: TestClient, node: FakeNode, mint_note
+):
+    # pay_invoice raised (e.g. the response was lost), but the funding
+    # source confirms the payment actually completed - the melt genuinely
+    # succeeded despite the local error, so this reports OK (not an error)
+    # and, crucially, does NOT restore the note: doing so would let a
+    # retry with a *different* invoice pay the same value out twice
+    k1 = mint_note(5000)
+    node.fail_payments = True
+    node.payment_actually_completed = True
+    pr = fake_invoice(5000)
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
+    assert note_value(client, k1) is None
+
+
+def test_undeterminable_payment_status_does_not_restore(client: TestClient, node: FakeNode, mint_note):
+    # if pay_invoice fails AND the confirmation check itself can't tell
+    # whether the payment went through, err toward *not* restoring - an
+    # honest caller might lose this note's value in this rare case, but
+    # that's preferable to risking a double payout if it actually succeeded
+    k1 = mint_note(5000)
+    node.fail_payments = True
+    node.is_payment_complete_raises = True
+    pr = fake_invoice(5000)
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
+    assert note_value(client, k1) is None
+
+
 def test_any_invalid_k1_fails_the_whole_request(client: TestClient, mint_note):
     k1 = mint_note(5000)
     bogus = urandom(32).hex()
