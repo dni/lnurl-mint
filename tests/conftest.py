@@ -1,9 +1,15 @@
 import os
 import tempfile
 
-# must be set before the package (and its module-level Settings/NoteStore)
-# is imported, so each test session gets its own throwaway database
+# both must run before the package (and its module-level Settings/NoteStore)
+# is imported: each test session gets its own throwaway database, and
+# Settings is pointed at a dotenv file that doesn't exist rather than the
+# repo's own .env (see config.py) - keeps tests isolated from a developer's
+# real local config (e.g. FUNDINGSOURCE_* credentials for testing against
+# lnurl_server's regtest nodes, or a BASE_URL override), regardless of what
+# that file contains.
 os.environ["DATABASE_PATH"] = os.path.join(tempfile.mkdtemp(), "test.db")
+os.environ["LNURL_MINT_ENV_FILE"] = os.path.join(tempfile.mkdtemp(), "unused.env")
 
 import time
 from hashlib import sha256
@@ -13,10 +19,12 @@ import bolt11
 import pytest
 from bolt11.models.tags import TagChar, Tags
 from bolt11.types import Bolt11
+from coincurve import PrivateKey
 from fastapi.testclient import TestClient
 
 import lnurl_mint.frontend as frontend_module
 import lnurl_mint.router as router_module
+import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
 from lnurl_mint.node import NodeInfo
 from lnurl_mint.server import app
@@ -41,6 +49,15 @@ class FakeNode:
         self.last_preimage: bytes = b""
         self.paid: list[str] = []
         self.fail_payments = False
+        # a real keypair, standing in for the node's own identity key - lets
+        # tests of LUD-XX Offline verification (signing.mint_pubkey/
+        # sign_note) exercise the real "Lightning Signed Message" signing
+        # and recovery logic without a real lnd/cln node
+        self.identity_key = PrivateKey()
+
+    @property
+    def pubkey(self) -> str:
+        return self.identity_key.public_key.format(compressed=True).hex()
 
     async def create_invoice(self, amount_msat: int, config, memo: str = "") -> tuple[str, bytes]:
         preimage = urandom(32)
@@ -57,7 +74,14 @@ class FakeNode:
         return urandom(32)
 
     async def fetch_node_info(self, config) -> NodeInfo:
-        return NodeInfo(alias="fakenode", uri="02abcdef@127.0.0.1:9735", num_channels=3, num_peers=5)
+        return NodeInfo(alias="fakenode", uri=f"{self.pubkey}@127.0.0.1:9735", num_channels=3, num_peers=5)
+
+    async def sign_message(self, message: str, config) -> tuple[bytes, int]:
+        # mirrors lnd's/cln's real signmessage: sign(sha256(sha256(b"Lightning
+        # Signed Message:" + message))) - see node.sign_message
+        digest = sha256(sha256(b"Lightning Signed Message:" + message.encode()).digest()).digest()
+        raw = self.identity_key.sign_recoverable(digest, hasher=None)
+        return raw[:64], raw[64]
 
 
 @pytest.fixture
@@ -68,6 +92,8 @@ def node(monkeypatch: pytest.MonkeyPatch) -> FakeNode:
     monkeypatch.setattr(router_module, "is_invoice_settled", fake.is_invoice_settled)
     monkeypatch.setattr(router_module, "pay_invoice", fake.pay_invoice)
     monkeypatch.setattr(frontend_module, "fetch_node_info", fake.fetch_node_info)
+    monkeypatch.setattr(signing_module, "fetch_node_info", fake.fetch_node_info)
+    monkeypatch.setattr(signing_module, "sign_message", fake.sign_message)
     return fake
 
 
@@ -83,7 +109,7 @@ def mint_note(client: TestClient, node: FakeNode):
     invoice from the pay callback, then 'pay' it."""
 
     def _mint(amount_msat: int) -> str:
-        response = client.get(f"/pay/cb?amount={amount_msat}")
+        response = client.get(f"/p/cb?amount={amount_msat}")
         assert response.json().get("pr"), response.text
         preimage = node.last_preimage
         node.settled.add(sha256(preimage).hexdigest())

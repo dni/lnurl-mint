@@ -54,6 +54,25 @@ async def pay_invoice(invoice: str, config: LightningBackendConfig) -> bytes:
     raise ValueError(f"pay_invoice is not supported for backend {config.backend!r}.")
 
 
+async def sign_message(message: str, config: LightningBackendConfig) -> tuple[bytes, int]:
+    """Signs `message` with this mint's own node identity key, via lnd's or
+    cln's signmessage RPC - both follow the standard "Lightning Signed
+    Message" convention (sign(sha256(sha256(b"Lightning Signed Message:" +
+    message))), recoverable), the same one BOLT11-adjacent tools (LNbits,
+    Zeus, ...) already use to prove node ownership. Neither backend exposes
+    a way to sign an arbitrary raw digest instead - this wrapping is always
+    applied. Returns (r || s, recovery_id)."""
+    if config.backend == "lnd":
+        if not config.url or not config.macaroon:
+            raise ValueError("Macaroon is required.")
+        return await _sign_message_lnd(message, config.url, config.macaroon.get_secret_value(), config)
+    if config.backend == "cln":
+        if not config.url or not config.rune:
+            raise ValueError("Rune is required.")
+        return await _sign_message_cln(message, config.url, config.rune.get_secret_value(), config)
+    raise ValueError(f"sign_message is not supported for backend {config.backend!r}.")
+
+
 async def is_invoice_settled(payment_hash: str, config: LightningBackendConfig) -> bool:
     """Whether an invoice this mint issued has been paid, checked against
     the funding source directly - callers should remember a True result
@@ -138,6 +157,36 @@ def _lnd_fee_limit_msat(invoice: str) -> int:
     return max(round(amount_msat * 0.005), 5000)
 
 
+_ZBASE32_ALPHABET = "ybndrfg8ejkmcpqxot1uwisza345h769"
+
+
+def _zbase32_decode(encoded: str) -> bytes:
+    bits = "".join(f"{_ZBASE32_ALPHABET.index(c):05b}" for c in encoded.strip())
+    whole_bytes = len(bits) // 8
+    return bytes(int(bits[i : i + 8], 2) for i in range(0, whole_bytes * 8, 8))
+
+
+async def _sign_message_lnd(message: str, url: str, macaroon: str, config: LightningBackendConfig) -> tuple[bytes, int]:
+    """lnd's REST SignMessage - takes base64, returns a zbase32-encoded 65
+    byte compact signature (1 header byte + r + s). lnd always treats its
+    identity key as compressed, so header = 27 + recovery_id + 4."""
+    async with httpx.AsyncClient(verify=config.verify) as client:
+        res = await client.post(
+            f"{url}/v1/signmessage",
+            headers={"Grpc-Metadata-macaroon": macaroon},
+            json={"msg": b64encode(message.encode()).decode()},
+        )
+        res.raise_for_status()
+        signature_zbase32 = res.json().get("signature")
+    if not signature_zbase32:
+        raise ValueError("lnd did not return a signature.")
+    raw = _zbase32_decode(signature_zbase32)
+    if len(raw) != 65:
+        raise ValueError(f"Unexpected lnd signature length: {len(raw)} bytes.")
+    header, r, s = raw[0], raw[1:33], raw[33:65]
+    return r + s, (header - 27) & 3
+
+
 # --- cln -------------------------------------------------------------------
 # clnrest REST plugin: https://docs.corelightning.org/docs/rest
 
@@ -181,6 +230,20 @@ async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningB
     preimage = _decode_hex_or_base64(preimage_hex)
     _verify_preimage(preimage, invoice)
     return preimage
+
+
+async def _sign_message_cln(message: str, url: str, rune: str, config: LightningBackendConfig) -> tuple[bytes, int]:
+    """Core Lightning's clnrest plugin signmessage - already returns r||s
+    and the recovery id separately (as hex), no zbase32 decoding needed;
+    its `zbase` field is the same lnd-compatible encoding, unused here."""
+    async with httpx.AsyncClient(verify=config.verify) as client:
+        res = await client.post(f"{url}/v1/signmessage", headers={"Rune": rune}, json={"message": message})
+        res.raise_for_status()
+        result = res.json()
+    signature_hex, recovery_id_hex = result.get("signature"), result.get("recid")
+    if not signature_hex or recovery_id_hex is None:
+        raise ValueError("cln did not return a signature.")
+    return bytes.fromhex(signature_hex), int(recovery_id_hex, 16)
 
 
 async def _is_invoice_settled_lnd(payment_hash: str, url: str, macaroon: str, config: LightningBackendConfig) -> bool:

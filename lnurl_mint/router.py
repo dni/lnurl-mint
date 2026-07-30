@@ -12,6 +12,7 @@ from .db import notes
 from .error_handler import LnurlErrorResponseHandler
 from .models import LnurlPayActionResponse, LnurlPayResponse, LnurlWithdrawResponse, WithdrawSuccessResponse
 from .node import LightningBackendConfig, create_invoice, is_invoice_settled, pay_invoice
+from .signing import mint_pubkey, sign_note
 
 router = APIRouter()
 router.route_class = LnurlErrorResponseHandler
@@ -75,15 +76,15 @@ def _pay_response(req: Request) -> LnurlPayResponse:
         ]
     )
     return LnurlPayResponse(
-        callback=f"{base}/pay/cb",
+        callback=f"{base}/p/cb",
         minSendable=settings.min_sendable_msat,
         maxSendable=settings.max_sendable_msat,
         metadata=metadata,
-        withdrawLink=f"{base}/withdraw",
+        withdrawLink=f"{base}/w",
     )
 
 
-@router.get("/pay", tags=["lnurlcash"])
+@router.get("/p", tags=["lnurlcash"])
 def get_pay(req: Request) -> LnurlPayResponse:
     """LUD-06 payRequest that mints lnurlcash bearer notes: `withdrawLink`
     points at the withdrawRequest endpoint (get_withdraw) that will
@@ -101,7 +102,7 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     return _pay_response(req)
 
 
-@router.get("/pay/cb", tags=["lnurlcash"])
+@router.get("/p/cb", tags=["lnurlcash"])
 async def get_pay_callback(amount: int) -> LnurlPayActionResponse:
     """LUD-06 callback: returns an invoice for `amount` msat whose preimage
     this mint generated itself (see node.create_invoice) - once the invoice
@@ -122,7 +123,7 @@ async def get_pay_callback(amount: int) -> LnurlPayActionResponse:
     return LnurlPayActionResponse(pr=pr)
 
 
-@router.get("/withdraw", tags=["lnurlcash"])
+@router.get("/w", tags=["lnurlcash"])
 async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> LnurlWithdrawResponse:
     """LUD-03 withdrawRequest for the bearer note `k1`. Purely informational:
     it never burns or alters the note (which is what makes it safe for any
@@ -135,7 +136,14 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
 
     `amount` is accepted only because a note's URL encodes a
     (wallet-declared, unauthoritative) value as `?k1=...&amount=...` - it
-    MUST be ignored here, never as a stand-in for the actual note value."""
+    MUST be ignored here, never as a stand-in for the actual note value.
+
+    `mintPubkey` (LUD-XX Offline verification) is advertised here rather
+    than on the payRequest side: a wallet paying the mint invoice can
+    already recover this mint's node id from the invoice's own signature,
+    so a freshly minted note needs no separate field - only notes obtained
+    via this endpoint's callback (rotate/split/merge, which have no
+    invoice) do."""
     resolved = await _resolve_note(k1)
     if resolved is None:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown or already spent note.")
@@ -147,10 +155,11 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
         minWithdrawable=amount_msat,
         maxWithdrawable=amount_msat,
         defaultDescription=f"lnurlcash bearer note on {req.url.hostname}",
+        mintPubkey=await mint_pubkey(settings.funding_source()),
     )
 
 
-@router.get("/withdraw/cb", tags=["lnurlcash"])
+@router.get("/w/cb", tags=["lnurlcash"])
 async def get_withdraw_callback(
     k1: list[str] = Query(...), pr: str | None = None, amount: int | None = None
 ) -> WithdrawSuccessResponse:
@@ -166,7 +175,11 @@ async def get_withdraw_callback(
     - many k1, no pr: merge - all burned, one note worth their sum minted.
 
     If any k1 is invalid, the whole request fails and nothing is burned or
-    minted (see NoteStore.swap's single transaction)."""
+    minted (see NoteStore.swap's single transaction). Every note minted
+    here (never on melt, which mints nothing) is signed per LUD-XX's
+    Offline verification, by the funding source node's own key - see
+    signing.sign_note; the fields are simply omitted if no funding source
+    is configured or signing fails for any other reason."""
     if pr is not None and (len(k1) > 1 or amount is not None):
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, "pr cannot be combined with multiple k1s or amount - merge or split first."
@@ -206,7 +219,13 @@ async def get_withdraw_callback(
         if not 0 < amount < total_msat:
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
         new_k1, change_k1 = notes.swap(note_ids, [amount, total_msat - amount])
-        return WithdrawSuccessResponse(k1=new_k1, change=change_k1)
+        funding_source = settings.funding_source()
+        return WithdrawSuccessResponse(
+            k1=new_k1,
+            change=change_k1,
+            signature=await sign_note(new_k1, amount, funding_source),
+            changeSignature=await sign_note(change_k1, total_msat - amount, funding_source),
+        )
 
     (new_k1,) = notes.swap(note_ids, [total_msat])
-    return WithdrawSuccessResponse(k1=new_k1)
+    return WithdrawSuccessResponse(k1=new_k1, signature=await sign_note(new_k1, total_msat, settings.funding_source()))

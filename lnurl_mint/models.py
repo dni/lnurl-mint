@@ -27,7 +27,11 @@ class LnurlPayActionResponse(BaseModel):
 class LnurlWithdrawResponse(BaseModel):
     """LUD-03 withdrawRequest for a single bearer note - min equals max
     equals the note's value, which is how a wallet reads a note's worth
-    (this GET is informational and never burns anything)."""
+    (this GET is informational and never burns anything).
+
+    `mintPubkey` (LUD-XX Offline verification, optional) is this mint's
+    signing key - omitted entirely if no funding source is configured
+    (see signing.mint_pubkey)."""
 
     tag: Literal["withdrawRequest"] = "withdrawRequest"
     callback: str
@@ -35,14 +39,24 @@ class LnurlWithdrawResponse(BaseModel):
     minWithdrawable: int
     maxWithdrawable: int
     defaultDescription: str = ""
+    mintPubkey: str | None = None
 
 
 class WithdrawSuccessResponse(BaseModel):
     """LUD-03 success response, extended per lnurlcash: `k1` is the newly
     minted bearer secret replacing the burned one(s) (rotate/merge/split),
     `change` the remainder note after a split. A melt (pr given) carries
-    neither - None fields are excluded on the wire."""
+    neither - None fields are excluded on the wire.
+
+    `signature`/`changeSignature` (LUD-XX Offline verification, optional)
+    are recoverable signatures over `k1`/`change` respectively, letting a
+    holder verify the note offline against `mintPubkey` without contacting
+    this mint - omitted (like `k1`/`change`) whenever there's no new note,
+    and omitted entirely if no funding source is configured (see
+    signing.sign_note)."""
 
     status: Literal["OK"] = "OK"
     k1: str | None = None
     change: str | None = None
+    signature: str | None = None
+    changeSignature: str | None = None

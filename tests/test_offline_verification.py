@@ -1,0 +1,97 @@
+from fastapi.testclient import TestClient
+
+from lnurl_mint.config import settings
+from lnurl_mint.signing import verify_note
+
+
+def test_mint_pubkey_absent_without_a_funding_source(client: TestClient, mint_note, monkeypatch):
+    k1 = mint_note(5000)
+    # settle the pending mint into a real outstanding note *before* removing
+    # the funding source - resolving a not-yet-settled one also depends on
+    # it (to check the invoice), which would fail this test for an unrelated
+    # reason (an unresolvable k1) rather than the one it's meant to check
+    assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == 5000
+    monkeypatch.setattr(settings, "fundingsource_backend", None)
+    data = client.get(f"/w?k1={k1}").json()
+    assert data["maxWithdrawable"] == 5000
+    assert "mintPubkey" not in data
+
+
+def test_signature_absent_without_a_funding_source(client: TestClient, mint_note, monkeypatch):
+    k1 = mint_note(5000)
+    assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == 5000
+    monkeypatch.setattr(settings, "fundingsource_backend", None)
+    data = client.get(f"/w/cb?k1={k1}").json()
+    assert data["status"] == "OK"
+    assert "signature" not in data
+
+
+def test_mint_pubkey_is_the_funding_source_nodes_own_identity(client: TestClient, mint_note, node):
+    k1 = mint_note(5000)
+    data = client.get(f"/w?k1={k1}").json()
+    assert data["mintPubkey"] == node.pubkey
+
+
+def test_rotate_returns_a_valid_signature(client: TestClient, mint_note, node):
+    k1 = mint_note(5000)
+    data = client.get(f"/w/cb?k1={k1}").json()
+    assert verify_note(node.pubkey, data["k1"], 5000, data["signature"])
+    assert "change" not in data
+    assert "changeSignature" not in data
+
+
+def test_split_returns_valid_signatures_for_both_notes(client: TestClient, mint_note, node):
+    k1 = mint_note(5000)
+    data = client.get(f"/w/cb?k1={k1}&amount=2000").json()
+    assert verify_note(node.pubkey, data["k1"], 2000, data["signature"])
+    assert verify_note(node.pubkey, data["change"], 3000, data["changeSignature"])
+
+
+def test_merge_returns_a_valid_signature(client: TestClient, mint_note, node):
+    a, b = mint_note(2000), mint_note(3000)
+    data = client.get(f"/w/cb?k1={a}&k1={b}").json()
+    assert verify_note(node.pubkey, data["k1"], 5000, data["signature"])
+
+
+def test_melt_carries_no_signature(client: TestClient, node, mint_note):
+    from tests.conftest import fake_invoice
+
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+    assert data == {"status": "OK"}
+
+
+def test_signature_does_not_verify_against_wrong_amount(client: TestClient, mint_note, node):
+    k1 = mint_note(5000)
+    data = client.get(f"/w/cb?k1={k1}").json()
+    assert not verify_note(node.pubkey, data["k1"], 5001, data["signature"])
+
+
+def test_signature_does_not_verify_against_wrong_k1(client: TestClient, mint_note, node):
+    k1 = mint_note(5000)
+    other_k1 = mint_note(5000)
+    data = client.get(f"/w/cb?k1={k1}").json()
+    assert not verify_note(node.pubkey, other_k1, 5000, data["signature"])
+
+
+def test_signature_does_not_verify_against_wrong_pubkey(client: TestClient, mint_note, node):
+    from coincurve import PrivateKey
+
+    k1 = mint_note(5000)
+    data = client.get(f"/w/cb?k1={k1}").json()
+    wrong_pubkey = PrivateKey().public_key.format(compressed=True).hex()
+    assert not verify_note(wrong_pubkey, data["k1"], 5000, data["signature"])
+
+
+def test_signing_failure_is_swallowed_not_raised(client: TestClient, mint_note, node, monkeypatch):
+    # a rotate/split/merge must still succeed even if the node is
+    # unreachable when asked to sign - offline verification is optional
+    async def _broken_sign_message(message, config):
+        raise ConnectionError("node unreachable")
+
+    monkeypatch.setattr("lnurl_mint.signing.sign_message", _broken_sign_message)
+    k1 = mint_note(5000)
+    data = client.get(f"/w/cb?k1={k1}").json()
+    assert data["status"] == "OK"
+    assert "signature" not in data

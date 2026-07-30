@@ -720,6 +720,7 @@ source = { editable = "." }
 dependencies = [
     { name = "bech32" },
     { name = "bolt11" },
+    { name = "coincurve" },
     { name = "fastapi", extra = ["standard"] },
     { name = "httpx" },
     { name = "pydantic-settings" },
@@ -738,6 +739,7 @@ dev = [
 requires-dist = [
     { name = "bech32", specifier = ">=1.2.0" },
     { name = "bolt11" },
+    { name = "coincurve", specifier = ">=20.0.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.11,<0.116.0" },
     { name = "httpx" },
     { name = "pydantic-settings", specifier = ">=2.0,<3.0" },

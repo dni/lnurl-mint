@@ -1,0 +1,70 @@
+from hashlib import sha256
+
+from coincurve import PublicKey
+
+from .node import LightningBackendConfig, fetch_node_info, sign_message
+
+# LUD-XX Offline verification: signed via this mint's own funding-source
+# node identity key (lnd's/cln's signmessage RPC - see node.sign_message),
+# which always wraps the message with this prefix and double-sha256s it
+# before signing - not a raw digest over a bespoke scheme, so any tool that
+# already verifies a Lightning node's signed messages can verify a note too.
+# Same reuse LUD-13 (../luds/13.md) relies on for LNURL-auth seed
+# generation, rather than a separate keypair.
+_LIGHTNING_SIGNED_MESSAGE_PREFIX = b"Lightning Signed Message:"
+_DOMAIN_TAG = "LNURLcash"
+
+
+def _message(k1: str, amount_msat: int) -> str:
+    """The message a note's signature commits to. Hashes sha256(k1) rather
+    than k1 itself, so a holder can prove issuance (e.g. to expose a mint
+    that won't honor its own note) without revealing the spend secret."""
+    return f"{_DOMAIN_TAG}:{amount_msat}:{sha256(bytes.fromhex(k1)).hexdigest()}"
+
+
+async def mint_pubkey(config: LightningBackendConfig) -> str | None:
+    """This mint's offline-verification signing key (LUD-XX `mintPubkey`) -
+    the funding source node's own identity pubkey, the same one it signs
+    BOLT-11 invoices with, so freshly minted and rotated notes verify
+    against the same identity, exactly as the spec recommends. None if no
+    funding source is configured or it's unreachable - offline verification
+    is then simply unavailable, the same way funding-source-backed features
+    are when that's unconfigured."""
+    if not config.backend:
+        return None
+    try:
+        info = await fetch_node_info(config)
+    except Exception:
+        return None
+    return info.uri.split("@")[0] if info.uri else None
+
+
+async def sign_note(k1: str, amount_msat: int, config: LightningBackendConfig) -> str | None:
+    """A recoverable signature over (k1, amount_msat) per LUD-XX's Offline
+    verification, signed by the funding source node's own signmessage RPC,
+    as 65 bytes (recovery id, then r, then s - note this orders the
+    recovery id *first*, unlike raw BOLT11 signatures, which place it
+    last), hex-encoded. None if signing isn't possible right now (no
+    funding source, or it's unreachable) - never raises, since a
+    rotate/split/merge must still succeed without it."""
+    if not config.backend:
+        return None
+    try:
+        r_s, recovery_id = await sign_message(_message(k1, amount_msat), config)
+    except Exception:
+        return None
+    return (bytes([recovery_id]) + r_s).hex()
+
+
+def verify_note(pubkey_hex: str, k1: str, amount_msat: int, signature_hex: str) -> bool:
+    """Verifies a signature produced by sign_note against a mintPubkey - the
+    check a WALLET performs offline, by reconstructing the same "Lightning
+    Signed Message" digest lnd/cln computed internally when signing. This
+    mint never calls it itself; it exists for the test suite to confirm
+    sign_note produces what the spec's algorithm expects."""
+    signature = bytes.fromhex(signature_hex)
+    recovery_id, r, s = signature[0], signature[1:33], signature[33:65]
+    message = _message(k1, amount_msat).encode()
+    digest = sha256(sha256(_LIGHTNING_SIGNED_MESSAGE_PREFIX + message).digest()).digest()
+    recovered = PublicKey.from_signature_and_message(r + s + bytes([recovery_id]), digest, hasher=None)
+    return recovered.format(compressed=True).hex() == pubkey_hex

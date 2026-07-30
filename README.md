@@ -7,21 +7,21 @@ assets on top of plain [LUD-03](../luds/03.md) `withdrawRequest` and
 
 A bearer note is a `k1` this mint has credited with value. It is minted by paying a
 LUD-06 invoice (the payment preimage *is* the note), circulates offline as
-`lnurlw://<host>/withdraw?k1=<k1>`, and can be rotated, split, merged, or melted back
+`lnurlw://<host>/w?k1=<k1>`, and can be rotated, split, merged, or melted back
 to a BOLT-11 payment.
 
 ## Endpoints
 
 | Endpoint        | Role                                                                          |
 |-----------------|-------------------------------------------------------------------------------|
-| `GET /`         | one-pager frontend: mint QR code (LNURL of `/pay`), lightning address, node info |
-| `GET /pay`      | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement)      |
-| `GET /pay/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid             |
-| `GET /withdraw` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
-| `GET /withdraw/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
-| `GET /.well-known/lnurlp/{username}` | LUD-16 alias for `/pay`, the mint is payable at `{USERNAME}@{BASE_URL host}` |
+| `GET /`         | one-pager frontend: mint QR code (LNURL of `/p`), lightning address, node info |
+| `GET /p`      | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement)      |
+| `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid             |
+| `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
+| `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
+| `GET /.well-known/lnurlp/{username}` | LUD-16 alias for `/p`, the mint is payable at `{USERNAME}@{BASE_URL host}` |
 
-Callback semantics (`/withdraw/cb`):
+Callback semantics (`/w/cb`):
 
 | `k1`  | `pr` | `amount` | Result                                                    |
 |-------|------|----------|-----------------------------------------------------------|
@@ -46,10 +46,33 @@ LUD-03 `k1` would, this mint disables uvicorn's per-request access log entirely
 (see `server.py`'s lifespan) rather than leave secrets in server logs by default;
 run it behind a reverse proxy if you want access logs for the other routes.
 
-**Not implemented:** the spec's optional offline-verification extension
-(`mintPubkey` + recoverable signatures on rotate/split/merge, letting a note be
-verified without contacting the mint). This mint's rotate/split/merge responses
-carry no `signature`/`changeSignature`, and `mintPubkey` is not advertised.
+**Offline verification** (optional): if a funding source is configured, `GET
+/w` advertises a `mintPubkey` - that node's own identity, the same key
+it signs BOLT-11 invoices with - and rotate/split/merge responses carry a
+recoverable `signature`/`changeSignature` over each new note, letting a holder
+verify a note's issuer and amount without contacting the mint (see
+`signing.py`). Notes are signed via the funding source's own signmessage RPC
+(lnd's `/v1/signmessage`, cln's `signmessage`), which both wrap the message
+with the standard "Lightning Signed Message:" prefix and double-sha256 it
+before signing - the same convention other Lightning tooling already uses to
+prove node ownership, rather than a bespoke raw-digest scheme neither backend
+can actually produce. There's no separate setting for this: without a funding
+source, both fields are simply omitted, same as any other unconfigured
+optional field, and signing failures (e.g. a briefly unreachable node) are
+swallowed rather than failing the rotate/split/merge itself.
+
+**Tor**: set `ONION_URL` to this mint's hidden service address (e.g.
+`http://<v3-address>.onion`) to advertise it on the frontend one-pager as an
+alternative way to reach the mint, alongside its clearnet QR/address. This
+isn't just cosmetic: if a wallet is actually connecting through that address,
+`ONION_URL` is used as the base for the LNURL/callback URLs *instead of*
+`BASE_URL` (see `config.py`'s `public_base_url`) - otherwise a fixed clearnet
+`BASE_URL` would leak into a Tor visitor's QR code, pointing their wallet's
+callback at a host it can't (or shouldn't have to) reach, breaking payment
+over Tor entirely. Running the hidden service itself is outside this app's
+scope - point a Tor `HiddenServiceDir` (or an onion-services-capable reverse
+proxy) at whatever host/port this mint is already listening on, the same way
+you'd front it with Caddy/nginx for clearnet.
 
 ## Run
 
@@ -71,3 +94,23 @@ typically already claims 8000. Override with `make run PORT=...`.
 ```sh
 uv run pytest
 ```
+
+## Release
+
+Pushing a `v*` tag (`git tag v1.2.0 && git push origin v1.2.0`) triggers
+`.github/workflows/release.yml`, which:
+
+* builds the image and pushes `dni/lnurl-mint` to Docker Hub, tagged `1.2.0`,
+  `1.2`, `1`, and `latest`
+* creates a GitHub Release for the tag (via `gh release create
+  --generate-notes`), with notes auto-generated from the commits/PRs merged
+  since the previous tag
+
+The Docker push needs two repo secrets (Settings → Secrets and variables →
+Actions):
+
+* `DOCKERHUB_USERNAME` - the Docker Hub account/org to push under
+* `DOCKERHUB_TOKEN` - an access token (not the account password), created at
+  [hub.docker.com/settings/security](https://hub.docker.com/settings/security)
+
+The GitHub Release needs no extra secret (just the default `GITHUB_TOKEN`).

@@ -1,4 +1,6 @@
+import os
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -7,12 +9,25 @@ from .node import LightningBackendConfig
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # env_file is overridable via LNURL_MINT_ENV_FILE (pointed at a
+    # nonexistent path by tests/conftest.py) so the test suite never picks
+    # up a developer's own .env in this same directory (e.g. real
+    # FUNDINGSOURCE_* credentials for local testing against lnurl_server's
+    # regtest nodes) - a real process env var can't cleanly cancel out a
+    # dotenv value (env_ignore_empty only skips *that* source, falling
+    # through to the next-lowest, i.e. right back to the dotenv file), so
+    # the file itself must not be read at all instead.
+    model_config = SettingsConfigDict(
+        env_file=os.environ.get("LNURL_MINT_ENV_FILE", ".env"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     # this mint's own funding source, configured once by the operator - used
     # to create the invoices that mint bearer notes and to pay the invoices
-    # that melt them. Only the credential for the chosen backend is required
-    # (macaroon for lnd, rune for cln); the other is ignored.
+    # that melt them, and to sign notes for LUD-XX's optional Offline
+    # verification via the node's own signmessage RPC (see signing.py) -
+    # there's no separate setting for that, it's simply unavailable without
+    # a funding source. Only the credential for the chosen backend is
+    # required (macaroon for lnd, rune for cln); the other is ignored.
     fundingsource_backend: Literal["lnd", "cln"] | None = None
     fundingsource_url: str | None = None
     fundingsource_macaroon: SecretStr | None = None
@@ -35,10 +50,25 @@ class Settings(BaseSettings):
     # QR code's LNURL, the lightning address domain, and the LUD-16 metadata
     # identifier. Falls back to each request's own base URL when unset.
     base_url: str | None = None
+    # this mint's Tor hidden service address (e.g. http://<v3-address>.onion),
+    # if it has one - advertised on the frontend one-pager as an alternative
+    # way to reach it (see frontend.py). If a wallet is actually connecting
+    # through this address (the request's own Host matches its hostname),
+    # public_base_url prefers it over base_url, so the LNURL/callback URLs
+    # in that response stay reachable over Tor - a fixed clearnet base_url
+    # would otherwise leak into a Tor visitor's QR code and break payment
+    # for them, since the callback would point back at a host Tor can't
+    # reach (or that defeats the point of using Tor to begin with).
+    onion_url: str | None = None
     # LUD-16: the mint is payable at {username}@{base_url host}
     username: str = "mint"
 
     def public_base_url(self, request_base_url: str) -> str:
+        if self.onion_url:
+            request_host = urlparse(request_base_url).hostname or ""
+            onion_host = urlparse(self.onion_url).hostname or ""
+            if request_host and request_host == onion_host:
+                return self.onion_url.rstrip("/")
         return (self.base_url or request_base_url).rstrip("/")
 
     def funding_source(self) -> LightningBackendConfig:

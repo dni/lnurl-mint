@@ -11,8 +11,8 @@ from .router import router
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    # LUD-XX: a bearer note's k1 lives in the query string of /withdraw and
-    # /withdraw/cb for as long as the note is held - unlike an ephemeral
+    # LUD-XX: a bearer note's k1 lives in the query string of /w and
+    # /w/cb for as long as the note is held - unlike an ephemeral
     # LUD-03 k1, that can be a long time, turning access logs into a
     # durable theft vector (see the spec's "Secrets in GET query strings").
     # uvicorn's default access log records the full request line, query

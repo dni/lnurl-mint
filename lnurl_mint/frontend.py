@@ -58,6 +58,9 @@ PAGE = Template(
   }
   .copy:hover { border-color: #4a5060; }
   .copy.copied { border-color: #7a9a65; }
+  p.hint { color: #9a978f; font-size: .85rem; margin-top: 1.5rem; line-height: 1.5; }
+  p.hint a { color: #e6e4dd; }
+  p.hint code { font-family: ui-monospace, monospace; color: #e6e4dd; }
   h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
        color: #9a978f; margin: 1.5rem 0 .5rem; }
   table { width: 100%; border-collapse: collapse; font-size: .85rem; }
@@ -74,6 +77,12 @@ PAGE = Template(
   <div class="qr">$qr_svg</div>
   <button class="copy" data-copy="$lnurl" title="Copy LNURL">$lnurl</button>
   <button class="copy" data-copy="$address" title="Copy lightning address">&#9889; $address</button>
+  <p class="hint">
+    After paying, redeem your bearer note at
+    <a href="https://dni.github.io/lnurl-wallet" target="_blank" rel="noopener">dni.github.io/lnurl-wallet</a>
+    &mdash; enter this mint's URL (<code>$base</code>) and the payment preimage.
+  </p>
+  $tor_section
   <h2>Node</h2>
   $node_section
 </main>
@@ -91,6 +100,13 @@ PAGE = Template(
 """
 )
 
+TOR_SECTION = Template(
+    """<h2>Also via Tor</h2>
+  <div class="qr">$qr_svg</div>
+  <button class="copy" data-copy="$lnurl" title="Copy LNURL">$lnurl</button>
+  <button class="copy" data-copy="$address" title="Copy lightning address">&#9889; $address</button>"""
+)
+
 NODE_SECTION = Template(
     """<table>
     <tr><td>Alias</td><td class="mono">$alias</td></tr>
@@ -99,6 +115,25 @@ NODE_SECTION = Template(
     <tr><td>Peers</td><td class="mono">$num_peers</td></tr>
   </table>"""
 )
+
+
+def _tor_section(base: str) -> str:
+    """An alternative LNURL/address for this mint's Tor hidden service
+    (ONION_URL), shown only when configured - and only when the current
+    request isn't already using it, since public_base_url already returns
+    the onion URL as the primary `base` in that case (see config.py), which
+    would make a second, identical block here redundant."""
+    onion_url = settings.onion_url
+    if not onion_url or base.rstrip("/") == onion_url.rstrip("/"):
+        return ""
+    onion_base = onion_url.rstrip("/")
+    onion_host = urlparse(onion_base).hostname or onion_base
+    onion_lnurl = lnurl_encode(f"{onion_base}/p")
+    return TOR_SECTION.substitute(
+        qr_svg=_qr_svg(onion_lnurl),
+        lnurl=onion_lnurl,
+        address=html.escape(f"{settings.username}@{onion_host}"),
+    )
 
 
 async def _node_section() -> str:
@@ -123,7 +158,7 @@ async def index(req: Request) -> HTMLResponse:
     bearer note), its lightning address, and the funding-source node info."""
     base = settings.public_base_url(str(req.base_url))
     host = urlparse(base).hostname or req.url.hostname or "localhost"
-    lnurl = lnurl_encode(f"{base}/pay")
+    lnurl = lnurl_encode(f"{base}/p")
     address = f"{settings.username}@{host}"
     page = PAGE.substitute(
         title=html.escape(settings.title),
@@ -131,6 +166,8 @@ async def index(req: Request) -> HTMLResponse:
         qr_svg=_qr_svg(lnurl),
         lnurl=lnurl,
         address=html.escape(address),
+        base=html.escape(base),
+        tor_section=_tor_section(base),
         node_section=await _node_section(),
     )
     return HTMLResponse(page)
