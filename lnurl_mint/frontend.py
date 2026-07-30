@@ -91,7 +91,7 @@ PAGE = Template(
   <h2>Node</h2>
   $node_section
   <footer>
-    <a href="https://github.com/dni256/lnurl-mint" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/dni/lnurl-mint" target="_blank" rel="noopener">GitHub</a>
     &middot;
     <a href="/docs">API docs</a>
     &middot;

@@ -34,7 +34,7 @@ def test_index_shows_footer_links(client: TestClient):
     from lnurl_mint import __version__
 
     response = client.get("/")
-    assert 'href="https://github.com/dni256/lnurl-mint"' in response.text
+    assert 'href="https://github.com/dni/lnurl-mint"' in response.text
     assert 'href="/docs"' in response.text
     assert f"v{__version__}" in response.text
 
