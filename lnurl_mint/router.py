@@ -42,6 +42,63 @@ def _funding_source() -> LightningBackendConfig:
     return funding_source
 
 
+async def _melt(note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11) -> WithdrawSuccessResponse:
+    """Pay `pr` from `note_ids`, which the caller (get_withdraw_callback)
+    has already reserved via NoteStore.mark_pending. Finalizes the burn
+    (NoteStore.finalize_melt) once the payment is confirmed settled - or,
+    when its outcome can't be confirmed either way, assumed settled to
+    avoid the risk of paying it out twice on a retry. Every other path out
+    of this function - including an exception this doesn't itself raise as
+    an HTTPException - leaves the notes merely pending, still burnable
+    later or restorable by the caller."""
+    # self-payment: `pr` is itself a still-outstanding invoice this same
+    # mint issued via /p/cb. Paying it over Lightning would just be the
+    # funding source routing a payment back to itself, so settle it
+    # directly instead: burn these notes and mark that invoice's
+    # payment_hash minted, atomically, with no Lightning round-trip.
+    # Whoever holds *that* invoice's preimage can then redeem the note it
+    # produces exactly as if it had been paid for real.
+    if decoded.has_payment_hash and notes.pending_mint(decoded.payment_hash) is not None:
+        if notes.settle_mint(decoded.payment_hash) is None:
+            # lost the race - a real payment or a concurrent self-payment
+            # settled this same invoice first
+            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Invoice already settled.")
+        notes.finalize_melt(note_ids)
+        return WithdrawSuccessResponse()
+
+    funding_source = _funding_source()
+    # notes stay merely "pending" (not yet burned) for the duration of the
+    # payment attempt - per the spec, SERVICE MUST NOT burn a melted k1
+    # until the outgoing payment actually settles. A failed payment leaves
+    # them for the caller to release back to outstanding. But "failed" must
+    # mean *confirmed* failed: pay_invoice can raise after the funding
+    # source already completed the payment (a dropped connection, a
+    # timeout on our side while it was still in flight, ...), and treating
+    # any raise as a definite failure would let the caller retry with a
+    # *different* invoice and get this same value paid out twice. So this
+    # only reports failure once the funding source itself confirms the
+    # payment did NOT go through - if even that check fails, the notes are
+    # finalized as burned rather than risk a double payout.
+    try:
+        await pay_invoice(pr, funding_source)
+    except Exception as exc:
+        if not decoded.has_payment_hash:
+            notes.finalize_melt(note_ids)
+            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+        try:
+            completed = await is_payment_complete(decoded.payment_hash, funding_source)
+        except Exception:
+            notes.finalize_melt(note_ids)
+            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}") from exc
+        if not completed:
+            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+        notes.finalize_melt(note_ids)
+        return WithdrawSuccessResponse()
+
+    notes.finalize_melt(note_ids)
+    return WithdrawSuccessResponse()
+
+
 def _note_id(k1: str) -> str:
     """A note's storage id: sha256 over the raw k1 bytes - for a minted
     note (k1 = payment preimage) this is exactly the payment hash of the
@@ -294,52 +351,23 @@ async def get_withdraw_callback(
         except PendingNoteError:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
 
-        # self-payment: `pr` is itself a still-outstanding invoice this same
-        # mint issued via /p/cb. Paying it over Lightning would just be the
-        # funding source routing a payment back to itself, so settle it
-        # directly instead: burn these notes and mark that invoice's
-        # payment_hash minted, atomically, with no Lightning round-trip.
-        # Whoever holds *that* invoice's preimage can then redeem the note
-        # it produces exactly as if it had been paid for real.
-        if decoded.has_payment_hash and notes.pending_mint(decoded.payment_hash) is not None:
-            if notes.settle_mint(decoded.payment_hash) is None:
-                # lost the race - a real payment or a concurrent self-payment
-                # settled this same invoice first
-                notes.restore(note_ids)
-                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Invoice already settled.")
-            notes.finalize_melt(note_ids)
-            return WithdrawSuccessResponse()
-
-        funding_source = _funding_source()
-        # notes stay merely "pending" (not yet burned) for the duration of
-        # the payment attempt - per the spec, SERVICE MUST NOT burn a melted
-        # k1 until the outgoing payment actually settles. A failed payment
-        # releases them back to outstanding. But "failed" must mean
-        # *confirmed* failed: pay_invoice can raise after the funding source
-        # already completed the payment (a dropped connection, a timeout on
-        # our side while it was still in flight, ...), and blindly releasing
-        # the reservation on any exception would let the caller retry with a
-        # *different* invoice and get this same value paid out twice. So a
-        # raise here only restores once the funding source itself confirms
-        # the payment did NOT go through - if even that check fails, the
-        # notes are finalized as burned rather than risk restoring a payment
-        # that actually succeeded.
         try:
-            await pay_invoice(pr, funding_source)
-        except Exception as exc:
-            if not decoded.has_payment_hash:
-                notes.finalize_melt(note_ids)
-                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
-            try:
-                completed = await is_payment_complete(decoded.payment_hash, funding_source)
-            except Exception:
-                notes.finalize_melt(note_ids)
-                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}") from exc
-            if not completed:
-                notes.restore(note_ids)
-                raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
-        notes.finalize_melt(note_ids)
-        return WithdrawSuccessResponse()
+            return await _melt(note_ids, pr, decoded)
+        except BaseException:
+            # whatever went wrong below - a misconfigured funding source, an
+            # unreachable node, a database hiccup, even this request getting
+            # cancelled (a client timeout mid-payment raises
+            # asyncio.CancelledError, a BaseException that a plain `except
+            # Exception` - including the outer error handler's - would NOT
+            # catch) - must release the reservation rather than strand these
+            # notes in "pending" forever with no payment definitively
+            # attempted. _melt itself finalizes (burns) the notes before
+            # returning successfully, or before raising in the cases where
+            # the payment might actually have gone through - restoring
+            # afterward in those cases is a harmless no-op, they're already
+            # spent=1 and restore only ever touches the pending flag.
+            notes.restore(note_ids)
+            raise
 
     try:
         if amount is not None:

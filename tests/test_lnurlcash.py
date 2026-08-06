@@ -5,6 +5,7 @@ from os import urandom
 
 from fastapi.testclient import TestClient
 
+from lnurl_mint.config import settings
 from tests.conftest import FakeNode, fake_invoice
 
 
@@ -171,6 +172,28 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
     assert result["melt"]["status"] == "ERROR"
     # the failed payment released the reservation - note is outstanding again
     assert note_value(client, k1) == 5000
+
+
+def test_pending_note_is_released_if_funding_source_becomes_unavailable(
+    client: TestClient, node: FakeNode, mint_note, monkeypatch
+):
+    # regression: a note must not get stuck "pending" forever if something
+    # goes wrong *after* it's reserved but *before* any payment is even
+    # attempted - e.g. the funding source becomes unconfigured between
+    # requests. Previously the reservation was never released in this case,
+    # permanently stranding the note despite no payment ever being tried.
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    assert note_value(client, k1) == 5000  # materialize the note before the funding source disappears
+    monkeypatch.setattr(settings, "fundingsource_backend", None)
+
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
+    assert node.paid == []
+
+    monkeypatch.setattr(settings, "fundingsource_backend", "lnd")
+    # the note must still be usable, not stuck pending forever
+    assert note_value(client, k1) == 5000
+    assert client.get(f"/w/cb?k1={k1}").json()["status"] == "OK"
 
 
 def test_melt_to_own_pending_invoice_settles_without_paying_the_node(client: TestClient, node: FakeNode, mint_note):
