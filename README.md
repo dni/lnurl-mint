@@ -26,9 +26,9 @@ Callback semantics (`/w/cb`):
 
 | `k1`  | `pr` | `amount` | Result                                                    |
 |-------|------|----------|-----------------------------------------------------------|
-| one   | yes  | –        | melt: note burned, `pr` (of exactly its value) paid       |
+| one   | yes  | –        | melt: note reserved, `pr` (of exactly its value) paid, burned once settled |
 | one   | no   | no       | rotate: burned, fresh `k1'` of the same value returned    |
-| one   | no   | yes      | split: burned, response carries `k1` (amount) + `change`  |
+| many  | no   | yes      | split: all burned, response carries `k1` (amount) + `change` |
 | many  | no   | –        | merge: all burned, one note worth the sum returned        |
 
 `pr` MUST NOT be combined with multiple `k1`s or with `amount`, melt several notes
@@ -37,6 +37,14 @@ literal secret it was queried with (never a derived id), and ignores an `amount`
 query param if present, notes may encode a wallet-declared value in their URL
 (`?k1=...&amount=...`) for offline display, but it is never authoritative;
 `maxWithdrawable` is.
+
+Per the spec, a melted `k1` MUST NOT be burned until its outgoing payment
+actually settles, so while a payment is in flight its note is only reserved
+(`pending`), not yet burned - any other callback naming that `k1` (another
+melt, a rotate, a split, a merge) fails with `{"status": "ERROR", "reason":
+"pending"}` until it resolves, at which point the note is either burned for
+good (payment settled) or released back to outstanding (payment confirmed
+failed).
 
 Per the spec's security considerations, no spendable secret is ever persisted: notes
 are stored keyed by `sha256(k1)`, for a minted note that is exactly the payment

@@ -8,7 +8,7 @@ import bolt11
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from .config import settings
-from .db import notes
+from .db import PendingNoteError, notes
 from .error_handler import LnurlErrorResponseHandler
 from .models import (
     LnurlPayActionResponse,
@@ -211,26 +211,32 @@ async def get_withdraw_callback(
 ) -> WithdrawSuccessResponse:
     """The lnurlcash callback - LUD-03 melt semantics, extended:
 
-    - single k1 + pr: melt - the note is burned, `pr` (of exactly its
-      value) gets paid. Plain {"status": "OK"}. `pr` MUST NOT be combined
-      with multiple k1s or with `amount` - merge (or split) first. If `pr`
-      is itself a still-outstanding invoice this same mint issued (see
-      create_mint), it's settled directly instead of actually being paid
-      over Lightning - functionally a rotate reached via payRequest/
-      withdrawRequest instead of the dedicated rotate callback, without the
-      pointless fee and failure exposure of a node paying itself.
+    - single k1 + pr: melt - the note is reserved (see NoteStore.
+      mark_pending) while `pr` (of exactly its value) gets paid, then
+      burned for good once that payment settles. Plain {"status": "OK"}.
+      `pr` MUST NOT be combined with multiple k1s or with `amount` - merge
+      (or split) first. If `pr` is itself a still-outstanding invoice this
+      same mint issued (see create_mint), it's settled directly instead of
+      actually being paid over Lightning - functionally a rotate reached
+      via payRequest/withdrawRequest instead of the dedicated rotate
+      callback, without the pointless fee and failure exposure of a node
+      paying itself.
     - one k1, no pr, no amount: rotate - burned and replaced by a fresh
       note of the same value.
-    - one k1 + amount: split - burned; `k1` in the response carries
-      `amount`, `change` the remainder.
-    - many k1, no pr: merge - all burned, one note worth their sum minted.
+    - many k1 + amount, no pr: split - all burned; `k1` in the response
+      carries `amount`, `change` the remainder.
+    - many k1, no pr, no amount: merge - all burned, one note worth their
+      sum minted.
 
     If any k1 is invalid, the whole request fails and nothing is burned or
-    minted (see NoteStore.swap's single transaction). Every note minted
-    here (never on melt, which mints nothing) is signed per LUD-XX's
-    Offline verification, by the funding source node's own key - see
-    signing.sign_note; the fields are simply omitted if no funding source
-    is configured or signing fails for any other reason."""
+    minted (see NoteStore.swap's single transaction). While a k1 is
+    reserved by an in-flight melt, every other callback naming it (another
+    melt, a rotate, a split, a merge) fails with reason "pending" instead
+    (see NoteStore.mark_pending). Every note minted here (never on melt,
+    which mints nothing) is signed per LUD-XX's Offline verification, by
+    the funding source node's own key - see signing.sign_note; the fields
+    are simply omitted if no funding source is configured or signing fails
+    for any other reason."""
     if pr is not None and (len(k1) > 1 or amount is not None):
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, "pr cannot be combined with multiple k1s or amount - merge or split first."
@@ -254,6 +260,11 @@ async def get_withdraw_callback(
         if decoded.amount_msat != total_msat:
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invoice must be for exactly {total_msat} msat.")
 
+        try:
+            notes.mark_pending(note_ids)
+        except PendingNoteError:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
+
         # self-payment: `pr` is itself a still-outstanding invoice this same
         # mint issued via /p/cb. Paying it over Lightning would just be the
         # funding source routing a payment back to itself, so settle it
@@ -262,54 +273,61 @@ async def get_withdraw_callback(
         # Whoever holds *that* invoice's preimage can then redeem the note
         # it produces exactly as if it had been paid for real.
         if decoded.has_payment_hash and notes.pending_mint(decoded.payment_hash) is not None:
-            notes.swap(note_ids, [])
             if notes.settle_mint(decoded.payment_hash) is None:
                 # lost the race - a real payment or a concurrent self-payment
                 # settled this same invoice first
                 notes.restore(note_ids)
                 raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Invoice already settled.")
+            notes.finalize_melt(note_ids)
             return WithdrawSuccessResponse()
 
         funding_source = _funding_source()
-        # burn first so a concurrent request can't double-spend while the
-        # payment is in flight; a failed payment restores the notes intact.
-        # But "failed" must mean *confirmed* failed: pay_invoice can raise
-        # after the funding source already completed the payment (a
-        # dropped connection, a timeout on our side while it was still
-        # in flight, ...), and blindly restoring on any exception would
-        # let the caller retry with a *different* invoice and get this
-        # same value paid out twice. So a raise here only restores once
-        # the funding source itself confirms the payment did NOT go
-        # through - if even that check fails, the notes stay burned
-        # rather than risk restoring a payment that actually succeeded.
-        notes.swap(note_ids, [])
+        # notes stay merely "pending" (not yet burned) for the duration of
+        # the payment attempt - per the spec, SERVICE MUST NOT burn a melted
+        # k1 until the outgoing payment actually settles. A failed payment
+        # releases them back to outstanding. But "failed" must mean
+        # *confirmed* failed: pay_invoice can raise after the funding source
+        # already completed the payment (a dropped connection, a timeout on
+        # our side while it was still in flight, ...), and blindly releasing
+        # the reservation on any exception would let the caller retry with a
+        # *different* invoice and get this same value paid out twice. So a
+        # raise here only restores once the funding source itself confirms
+        # the payment did NOT go through - if even that check fails, the
+        # notes are finalized as burned rather than risk restoring a payment
+        # that actually succeeded.
         try:
             await pay_invoice(pr, funding_source)
         except Exception as exc:
             if not decoded.has_payment_hash:
+                notes.finalize_melt(note_ids)
                 raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
             try:
                 completed = await is_payment_complete(decoded.payment_hash, funding_source)
             except Exception:
+                notes.finalize_melt(note_ids)
                 raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}") from exc
             if not completed:
                 notes.restore(note_ids)
                 raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+        notes.finalize_melt(note_ids)
         return WithdrawSuccessResponse()
 
-    if amount is not None:
-        if len(k1) != 1:
-            raise HTTPException(HTTPStatus.BAD_REQUEST, "amount requires a single k1 - merge first.")
-        if not 0 < amount < total_msat:
-            raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
-        new_k1, change_k1 = notes.swap(note_ids, [amount, total_msat - amount])
-        funding_source = settings.funding_source()
-        return WithdrawSuccessResponse(
-            k1=new_k1,
-            change=change_k1,
-            signature=await sign_note(new_k1, amount, funding_source),
-            changeSignature=await sign_note(change_k1, total_msat - amount, funding_source),
-        )
+    try:
+        if amount is not None:
+            if not 0 < amount < total_msat:
+                raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
+            new_k1, change_k1 = notes.swap(note_ids, [amount, total_msat - amount])
+            funding_source = settings.funding_source()
+            return WithdrawSuccessResponse(
+                k1=new_k1,
+                change=change_k1,
+                signature=await sign_note(new_k1, amount, funding_source),
+                changeSignature=await sign_note(change_k1, total_msat - amount, funding_source),
+            )
 
-    (new_k1,) = notes.swap(note_ids, [total_msat])
-    return WithdrawSuccessResponse(k1=new_k1, signature=await sign_note(new_k1, total_msat, settings.funding_source()))
+        (new_k1,) = notes.swap(note_ids, [total_msat])
+        return WithdrawSuccessResponse(
+            k1=new_k1, signature=await sign_note(new_k1, total_msat, settings.funding_source())
+        )
+    except PendingNoteError:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")

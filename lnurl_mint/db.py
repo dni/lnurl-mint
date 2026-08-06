@@ -6,6 +6,13 @@ from os import urandom
 from .config import settings
 
 
+class PendingNoteError(Exception):
+    """Raised when a callback tries to burn a note that's mid-melt (see
+    NoteStore.mark_pending) - a distinct case from "invalid or already
+    spent" per the spec, which requires SERVICE reject it with
+    {"status": "ERROR", "reason": "pending"} rather than a generic error."""
+
+
 class NoteStore:
     """The set of outstanding bearer notes this mint has issued, plus the
     pending mints (invoices whose preimage becomes a note once paid).
@@ -36,7 +43,8 @@ class NoteStore:
                 "CREATE TABLE IF NOT EXISTS notes ("
                 " id TEXT PRIMARY KEY,"  # sha256(k1), never the secret itself
                 " amount_msat INTEGER NOT NULL,"
-                " spent INTEGER NOT NULL DEFAULT 0)"
+                " spent INTEGER NOT NULL DEFAULT 0,"
+                " pending INTEGER NOT NULL DEFAULT 0)"  # reserved by an in-flight melt, see mark_pending
             )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS mints ("
@@ -56,6 +64,12 @@ class NoteStore:
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(mints)")}
             if "pr" not in columns:
                 self._conn.execute("ALTER TABLE mints ADD COLUMN pr TEXT NOT NULL DEFAULT ''")
+            # likewise, a database from before the async-melt pending lock
+            # has no `pending` column - existing rows predate it entirely,
+            # so nothing was ever mid-melt and 0 is the correct default.
+            note_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(notes)")}
+            if "pending" not in note_columns:
+                self._conn.execute("ALTER TABLE notes ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
             self._conn.commit()
         return self._conn
 
@@ -121,15 +135,23 @@ class NoteStore:
         the only time they ever exist on this side; only their hashes are
         stored. Raises ValueError - burning and minting nothing - if any id
         is unknown, already spent, or repeated (the second burn of a
-        duplicate finds it spent by the first)."""
+        duplicate finds it spent by the first). Raises PendingNoteError
+        instead if any id is reserved by an in-flight melt (see
+        mark_pending): per the spec, that's a distinct "pending" rejection,
+        not a plain invalid/spent one."""
         new_k1s = [urandom(32).hex() for _ in mint_amounts]
         with self._lock:
             try:
                 with self.conn:
                     for note_id in burn_ids:
-                        cursor = self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ? AND spent = 0", (note_id,))
-                        if cursor.rowcount != 1:
+                        row = self.conn.execute(
+                            "SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)
+                        ).fetchone()
+                        if row is None:
                             raise ValueError("Invalid or already spent k1.")
+                        if row[0]:
+                            raise PendingNoteError("pending")
+                        self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
                     for k1, amount_msat in zip(new_k1s, mint_amounts):
                         note_id = sha256(bytes.fromhex(k1)).hexdigest()
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
@@ -137,12 +159,41 @@ class NoteStore:
                 raise ValueError(f"Note swap failed: {exc!s}") from exc
         return new_k1s
 
-    def restore(self, note_ids: list[str]) -> None:
-        """Un-burn notes after a failed melt - the invoice was never paid,
-        so the notes must remain outstanding."""
+    def mark_pending(self, note_ids: list[str]) -> None:
+        """Reserve `note_ids` for an in-flight melt without burning them yet.
+        Per the spec, SERVICE MUST NOT burn a melted k1 until its outgoing
+        payment actually settles, but every other callback naming one of
+        these ids meanwhile (another melt, a rotate, a split, a merge) MUST
+        be rejected with reason "pending" - see swap and this method's
+        raises. All-or-nothing, like swap. Follow with finalize_melt once
+        the payment settles, or restore if it doesn't."""
         with self._lock, self.conn:
             for note_id in note_ids:
-                self.conn.execute("UPDATE notes SET spent = 0 WHERE id = ?", (note_id,))
+                row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
+                if row is None:
+                    raise ValueError("Invalid or already spent k1.")
+                if row[0]:
+                    raise PendingNoteError("pending")
+            for note_id in note_ids:
+                self.conn.execute("UPDATE notes SET pending = 1 WHERE id = ?", (note_id,))
+
+    def finalize_melt(self, note_ids: list[str]) -> None:
+        """Burn notes for good once their melt's outgoing payment has
+        settled (or is confirmed/assumed unrecoverable - see router.py) -
+        the counterpart to mark_pending that actually spends them. A melt
+        mints nothing, unlike swap."""
+        with self._lock, self.conn:
+            for note_id in note_ids:
+                self.conn.execute("UPDATE notes SET spent = 1, pending = 0 WHERE id = ?", (note_id,))
+
+    def restore(self, note_ids: list[str]) -> None:
+        """Release notes reserved by mark_pending after their melt's
+        outgoing payment failed (and is confirmed not to have gone through)
+        - the notes were never burned, so this just clears the reservation,
+        leaving them outstanding again."""
+        with self._lock, self.conn:
+            for note_id in note_ids:
+                self.conn.execute("UPDATE notes SET pending = 0 WHERE id = ?", (note_id,))
 
 
 notes = NoteStore(settings.database_path)

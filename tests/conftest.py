@@ -11,6 +11,7 @@ import tempfile
 os.environ["DATABASE_PATH"] = os.path.join(tempfile.mkdtemp(), "test.db")
 os.environ["LNURL_MINT_ENV_FILE"] = os.path.join(tempfile.mkdtemp(), "unused.env")
 
+import asyncio
 import time
 from hashlib import sha256
 from os import urandom
@@ -55,6 +56,10 @@ class FakeNode:
         # being unable to tell either way
         self.payment_actually_completed = False
         self.is_payment_complete_raises = False
+        # seconds to block inside pay_invoice before resolving - simulates
+        # an in-flight payment for tests of the melt "pending" lock, which
+        # otherwise has no observable window in a single-threaded test
+        self.pay_delay = 0.0
         # a real keypair, standing in for the node's own identity key - lets
         # tests of LUD-XX Offline verification (signing.mint_pubkey/
         # sign_note) exercise the real "Lightning Signed Message" signing
@@ -74,6 +79,8 @@ class FakeNode:
         return payment_hash in self.settled
 
     async def pay_invoice(self, invoice: str, config) -> bytes:
+        if self.pay_delay:
+            await asyncio.sleep(self.pay_delay)
         if self.fail_payments:
             raise ValueError("Payment failed: no route.")
         self.paid.append(invoice)

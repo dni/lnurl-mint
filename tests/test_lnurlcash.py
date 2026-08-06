@@ -1,3 +1,5 @@
+import threading
+import time
 from hashlib import sha256
 from os import urandom
 
@@ -62,6 +64,18 @@ def test_split_mints_amount_and_change(client: TestClient, mint_note):
     assert note_value(client, data["change"]) == 3000
 
 
+def test_split_merges_multiple_k1s_first(client: TestClient, mint_note):
+    # a split may now name several k1s at once - merge them, then split off
+    # `amount`, same as merging first and splitting the result separately
+    a, b = mint_note(2000), mint_note(3000)
+    data = client.get(f"/w/cb?k1={a}&k1={b}&amount=1000").json()
+    assert data["status"] == "OK"
+    assert note_value(client, a) is None
+    assert note_value(client, b) is None
+    assert note_value(client, data["k1"]) == 1000
+    assert note_value(client, data["change"]) == 4000
+
+
 def test_split_rejects_amount_out_of_range(client: TestClient, mint_note):
     k1 = mint_note(5000)
     for amount in (0, 5000, 6000):
@@ -113,9 +127,53 @@ def test_failed_payment_restores_the_notes(client: TestClient, node: FakeNode, m
     assert note_value(client, k1) == 5000
 
 
-def test_melt_to_own_pending_invoice_settles_without_paying_the_node(
-    client: TestClient, node: FakeNode, mint_note
-):
+def test_pending_note_rejects_concurrent_operations(client: TestClient, node: FakeNode, mint_note):
+    # while a melt's outgoing payment is in flight, its k1 is reserved but
+    # not yet burned - any other callback naming it must be rejected with
+    # reason "pending", not treated as merely invalid/spent
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    node.pay_delay = 0.3
+    result: dict = {}
+
+    def melt():
+        result["melt"] = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+
+    thread = threading.Thread(target=melt)
+    thread.start()
+    time.sleep(0.1)  # let the melt mark the note pending before racing it
+    concurrent = client.get(f"/w/cb?k1={k1}").json()
+    thread.join()
+
+    assert concurrent == {"status": "ERROR", "reason": "pending"}
+    assert result["melt"]["status"] == "OK"
+    assert node.paid == [pr]
+    assert note_value(client, k1) is None
+
+
+def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node: FakeNode, mint_note):
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    node.pay_delay = 0.3
+    node.fail_payments = True
+    result: dict = {}
+
+    def melt():
+        result["melt"] = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+
+    thread = threading.Thread(target=melt)
+    thread.start()
+    time.sleep(0.1)
+    concurrent = client.get(f"/w/cb?k1={k1}").json()
+    thread.join()
+
+    assert concurrent == {"status": "ERROR", "reason": "pending"}
+    assert result["melt"]["status"] == "ERROR"
+    # the failed payment released the reservation - note is outstanding again
+    assert note_value(client, k1) == 5000
+
+
+def test_melt_to_own_pending_invoice_settles_without_paying_the_node(client: TestClient, node: FakeNode, mint_note):
     # melting straight into an invoice this same mint issued (and hasn't
     # settled yet) shouldn't round-trip through the node at all - it's
     # settled locally, and the new invoice's preimage becomes a spendable
@@ -132,9 +190,7 @@ def test_melt_to_own_pending_invoice_settles_without_paying_the_node(
     assert note_value(client, new_k1) == 5000
 
 
-def test_melt_to_already_settled_own_invoice_falls_back_to_paying_it(
-    client: TestClient, node: FakeNode, mint_note
-):
+def test_melt_to_already_settled_own_invoice_falls_back_to_paying_it(client: TestClient, node: FakeNode, mint_note):
     # if the target invoice is one of ours but already settled (e.g. someone
     # else genuinely paid it first), the shortcut doesn't apply - it's no
     # longer "pending", so this behaves like paying any other invoice
