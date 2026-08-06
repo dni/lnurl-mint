@@ -95,6 +95,24 @@ async def is_payment_complete(payment_hash: str, config: LightningBackendConfig)
     raise ValueError(f"is_payment_complete is not supported for backend {config.backend!r}.")
 
 
+async def invoice_preimage(payment_hash: str, config: LightningBackendConfig) -> bytes | None:
+    """The preimage of an invoice this mint issued, if it has settled -
+    fetched live from the funding source rather than cached anywhere (see
+    db.NoteStore's store-hashes-not-secrets policy), since for lnurlcash
+    this preimage IS the bearer note's spend secret. Used by LUD-21 verify
+    to hand it to a wallet with no node of its own, letting it claim and
+    rotate the note immediately per the spec's Security considerations."""
+    if config.backend == "lnd":
+        if not config.url or not config.macaroon:
+            raise ValueError("Macaroon is required.")
+        return await _invoice_preimage_lnd(payment_hash, config.url, config.macaroon.get_secret_value(), config)
+    if config.backend == "cln":
+        if not config.url or not config.rune:
+            raise ValueError("Rune is required.")
+        return await _invoice_preimage_cln(payment_hash, config.url, config.rune.get_secret_value(), config)
+    raise ValueError(f"invoice_preimage is not supported for backend {config.backend!r}.")
+
+
 async def sign_message(message: str, config: LightningBackendConfig) -> tuple[bytes, int]:
     """Signs `message` with this mint's own node identity key, via lnd's or
     cln's signmessage RPC - both follow the standard "Lightning Signed
@@ -343,6 +361,35 @@ async def _is_invoice_settled_cln(payment_hash: str, url: str, rune: str, config
         await _raise_for_status(res)
         invoices = res.json().get("invoices") or []
     return bool(invoices) and invoices[0].get("status") == "paid"
+
+
+async def _invoice_preimage_lnd(
+    payment_hash: str, url: str, macaroon: str, config: LightningBackendConfig
+) -> bytes | None:
+    """lnd's REST LookupInvoice always echoes back r_preimage (base64) -
+    this mint supplied it itself at creation (see _create_invoice_lnd) - so
+    it's only withheld here, not by lnd, until `settled` is true."""
+    async with httpx.AsyncClient(verify=config.verify) as client:
+        res = await client.get(f"{url}/v1/invoice/{payment_hash}", headers={"Grpc-Metadata-macaroon": macaroon})
+        await _raise_for_status(res)
+        data = res.json()
+    if not data.get("settled"):
+        return None
+    preimage_b64 = data.get("r_preimage")
+    return _decode_hex_or_base64(preimage_b64) if preimage_b64 else None
+
+
+async def _invoice_preimage_cln(payment_hash: str, url: str, rune: str, config: LightningBackendConfig) -> bytes | None:
+    """Core Lightning's clnrest plugin listinvoices - `payment_preimage` is
+    only populated once `status` is "paid"."""
+    async with httpx.AsyncClient(verify=config.verify) as client:
+        res = await client.post(f"{url}/v1/listinvoices", headers={"Rune": rune}, json={"payment_hash": payment_hash})
+        await _raise_for_status(res)
+        invoices = res.json().get("invoices") or []
+    if not invoices or invoices[0].get("status") != "paid":
+        return None
+    preimage_hex = invoices[0].get("payment_preimage")
+    return bytes.fromhex(preimage_hex) if preimage_hex else None
 
 
 class NodeInfo(BaseModel):

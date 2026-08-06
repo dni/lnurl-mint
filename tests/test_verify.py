@@ -34,17 +34,15 @@ def test_verify_reports_settled_after_payment(client: TestClient, node):
     node.settled.add(payment_hash)
 
     result = client.get(f"/verify/{payment_hash}").json()
-    assert result == {"status": "OK", "settled": True, "pr": data["pr"]}
+    assert result == {"status": "OK", "settled": True, "pr": data["pr"], "preimage": node.last_preimage.hex()}
 
 
-def test_verify_never_reveals_the_preimage(client: TestClient, node):
-    # the payment preimage IS the bearer note's spend secret - LUD-21's
-    # own example response includes it, but doing that here would let
-    # anyone who merely saw the invoice steal the note the instant it
-    # settles, so this field must never appear regardless of settlement
+def test_verify_withholds_the_preimage_before_settlement(client: TestClient, node):
+    # the payment preimage IS the bearer note's spend secret - it's only
+    # handed over once settled, so an unsettled invoice's verify response
+    # must not leak it even though the node already knows it
     client.get("/p/cb?amount=5000")
     payment_hash = sha256(node.last_preimage).hexdigest()
-    node.settled.add(payment_hash)
 
     body = client.get(f"/verify/{payment_hash}").text
     assert node.last_preimage.hex() not in body
@@ -59,15 +57,21 @@ def test_verify_unknown_payment_hash_is_not_found(client: TestClient):
 
 def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, mint_note):
     # LUD-21 verify answers "was this invoice ever paid", not "is there a
-    # spendable note right now" - those diverge once the note is rotated
+    # spendable note right now" - those diverge once the note is rotated,
+    # but the preimage - fetched live from the node, never cached - is
+    # still handed back regardless, since the node retains it indefinitely
     k1 = mint_note(5000)
     payment_hash = sha256(bytes.fromhex(k1)).hexdigest()
-    assert client.get(f"/verify/{payment_hash}").json()["settled"] is True
+    result = client.get(f"/verify/{payment_hash}").json()
+    assert result["settled"] is True
+    assert result["preimage"] == k1
 
     rotated = client.get(f"/w/cb?k1={k1}").json()
     assert rotated["status"] == "OK"
 
-    assert client.get(f"/verify/{payment_hash}").json()["settled"] is True
+    result = client.get(f"/verify/{payment_hash}").json()
+    assert result["settled"] is True
+    assert result["preimage"] == k1
 
 
 def test_verify_works_even_when_not_advertised(client: TestClient, node):

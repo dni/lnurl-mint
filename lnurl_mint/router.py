@@ -17,7 +17,14 @@ from .models import (
     LnurlWithdrawResponse,
     WithdrawSuccessResponse,
 )
-from .node import LightningBackendConfig, create_invoice, is_invoice_settled, is_payment_complete, pay_invoice
+from .node import (
+    LightningBackendConfig,
+    create_invoice,
+    invoice_preimage,
+    is_invoice_settled,
+    is_payment_complete,
+    pay_invoice,
+)
 from .signing import mint_pubkey, sign_note
 
 router = APIRouter()
@@ -61,6 +68,24 @@ async def _mint_settled(payment_hash: str) -> bool:
         return False
     notes.settle_mint(payment_hash)
     return True
+
+
+async def _mint_preimage(payment_hash: str) -> str | None:
+    """Hex-encoded preimage of a settled mint invoice, fetched live from the
+    funding source for LUD-21 verify - never cached locally (see db.py's
+    store-hashes-not-secrets policy), so this hits the node on every call
+    rather than being persisted anywhere. None if there's no funding source
+    to ask, or the node lookup itself fails for any reason - verify still
+    reports `settled` correctly either way, just without a preimage to
+    hand over."""
+    funding_source = settings.funding_source()
+    if not funding_source.backend:
+        return None
+    try:
+        preimage = await invoice_preimage(payment_hash, funding_source)
+    except Exception:
+        return None
+    return preimage.hex() if preimage else None
 
 
 async def _note_amount_by_id(note_id: str) -> int | None:
@@ -156,17 +181,21 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     this URL, the same way LUD-21 implementations elsewhere in this
     ecosystem treat their own verify toggle.
 
-    `preimage` is never populated, unlike the spec's example response: for
-    lnurlcash the preimage IS the bearer note's spend secret (see LUD-XX's
-    Minting a bearer note from a payRequest), so returning it here would
-    let anyone who merely knows the payment_hash - not proof of payment,
-    just having seen the invoice - steal the note the instant it settles,
-    racing whoever actually paid for it. `status`/`settled`/`pr` otherwise
-    behave exactly per LUD-21."""
+    `preimage`, once settled, IS the bearer note's spend secret (see
+    LUD-XX's Minting a bearer note from a payRequest) - deliberately
+    returned anyway, fetched live from the funding source rather than
+    cached (see _mint_preimage), because a wallet with no node of its own
+    has no other way to learn it and claim the note. Per the spec's
+    Security considerations, that wallet MUST then rotate the note
+    immediately: `SERVICE`'s own node already is a permanent prior holder
+    of this secret, and verify only makes confirming settlement
+    convenient, it does nothing to shrink that exposure window on its own."""
     pr = notes.mint_pr(payment_hash)
     if pr is None:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
-    return LnurlPayVerifyResponse(settled=await _mint_settled(payment_hash), pr=pr)
+    settled = await _mint_settled(payment_hash)
+    preimage = await _mint_preimage(payment_hash) if settled else None
+    return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
 
 
 @router.get("/w", tags=["lnurlcash"])

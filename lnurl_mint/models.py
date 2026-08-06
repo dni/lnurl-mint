@@ -31,12 +31,15 @@ class LnurlPayActionResponse(BaseModel):
 class LnurlPayVerifyResponse(BaseModel):
     """LUD-21: settlement status for an invoice minted via `/p/cb`.
 
-    `preimage` is intentionally never populated: for lnurlcash the preimage
-    IS the bearer note's spend secret (see LUD-XX's Minting a bearer note
-    from a payRequest), so returning it here - to anyone who merely knows
-    the payment_hash, no proof of payment required - would let them steal
-    the note the instant it settles. `status`/`settled`/`pr` otherwise
-    behave exactly per LUD-21."""
+    `preimage`, once settled, IS the freshly minted bearer note's spend
+    secret (see LUD-XX's Minting a bearer note from a payRequest) - unlike
+    a plain LUD-21 proof-of-payment, a wallet with no node of its own needs
+    it to claim and immediately rotate the note (per the spec's Security
+    considerations: `SERVICE`'s own node is a permanent prior holder of a
+    freshly minted note's secret, so deferring the rotate leaves that
+    exposure window open regardless of how promptly settlement was
+    checked). `status`/`settled`/`pr` otherwise behave exactly per
+    LUD-21."""
 
     status: Literal["OK"] = "OK"
     settled: bool

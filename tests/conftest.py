@@ -48,6 +48,7 @@ class FakeNode:
     def __init__(self) -> None:
         self.settled: set[str] = set()
         self.last_preimage: bytes = b""
+        self.preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for invoice_preimage
         self.paid: list[str] = []
         self.fail_payments = False
         # for simulating an *ambiguous* pay_invoice failure - the funding
@@ -73,10 +74,17 @@ class FakeNode:
     async def create_invoice(self, amount_msat: int, config, memo: str = "") -> tuple[str, bytes]:
         preimage = urandom(32)
         self.last_preimage = preimage
-        return fake_invoice(amount_msat, sha256(preimage).hexdigest()), preimage
+        payment_hash = sha256(preimage).hexdigest()
+        self.preimages[payment_hash] = preimage
+        return fake_invoice(amount_msat, payment_hash), preimage
 
     async def is_invoice_settled(self, payment_hash: str, config) -> bool:
         return payment_hash in self.settled
+
+    async def invoice_preimage(self, payment_hash: str, config) -> bytes | None:
+        if payment_hash not in self.settled:
+            return None
+        return self.preimages.get(payment_hash)
 
     async def pay_invoice(self, invoice: str, config) -> bytes:
         if self.pay_delay:
@@ -108,6 +116,7 @@ def node(monkeypatch: pytest.MonkeyPatch) -> FakeNode:
     monkeypatch.setattr(settings, "fundingsource_backend", "lnd")
     monkeypatch.setattr(router_module, "create_invoice", fake.create_invoice)
     monkeypatch.setattr(router_module, "is_invoice_settled", fake.is_invoice_settled)
+    monkeypatch.setattr(router_module, "invoice_preimage", fake.invoice_preimage)
     monkeypatch.setattr(router_module, "pay_invoice", fake.pay_invoice)
     monkeypatch.setattr(router_module, "is_payment_complete", fake.is_payment_complete)
     monkeypatch.setattr(frontend_module, "fetch_node_info", fake.fetch_node_info)
