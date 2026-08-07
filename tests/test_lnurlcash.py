@@ -124,7 +124,10 @@ def test_failed_payment_restores_the_notes(client: TestClient, node: FakeNode, m
     k1 = mint_note(5000)
     node.fail_payments = True
     pr = fake_invoice(5000)
-    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
+    # per LUD-03 step 6, the callback replies OK immediately and pays
+    # asynchronously - a payment failure is only ever observable via the
+    # note becoming spendable again, never via this response
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
     assert note_value(client, k1) == 5000
 
 
@@ -169,25 +172,25 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
     thread.join()
 
     assert concurrent == {"status": "ERROR", "reason": "pending"}
-    assert result["melt"]["status"] == "ERROR"
-    # the failed payment released the reservation - note is outstanding again
+    # the callback itself already replied OK (per LUD-03, before the
+    # payment was even attempted) - the failure only shows up as the note
+    # being outstanding again
+    assert result["melt"]["status"] == "OK"
     assert note_value(client, k1) == 5000
 
 
-def test_definite_payment_failure_restores_immediately_with_a_clean_reason(
+def test_definite_payment_failure_restores_immediately_without_the_fallback_check(
     client: TestClient, node: FakeNode, mint_note
 ):
     # a routing failure is the funding source's own definitive answer, not
-    # an ambiguous one - melt should report the clean reason text as-is and
-    # restore the note right away, without even calling the fallback
-    # is_payment_complete check
+    # an ambiguous one - melt should restore the note right away, without
+    # even calling the fallback is_payment_complete check
     k1 = mint_note(5000)
     node.fail_reason = "Could not find a route to pay this invoice."
     pr = fake_invoice(5000)
 
-    response = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
 
-    assert response == {"status": "ERROR", "reason": "Could not find a route to pay this invoice."}
     assert note_value(client, k1) == 5000
     assert node.is_payment_complete_called is False
 
@@ -272,7 +275,7 @@ def test_undeterminable_payment_status_does_not_restore(client: TestClient, node
     node.fail_payments = True
     node.is_payment_complete_raises = True
     pr = fake_invoice(5000)
-    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
     assert note_value(client, k1) is None
 
 

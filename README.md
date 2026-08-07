@@ -26,7 +26,7 @@ Callback semantics (`/w/cb`):
 
 | `k1`  | `pr` | `amount` | Result                                                    |
 |-------|------|----------|-----------------------------------------------------------|
-| one   | yes  | –        | melt: note reserved, `pr` (of exactly its value) paid, burned once settled |
+| one   | yes  | –        | melt: note reserved, OK returned immediately, `pr` (of exactly its value) paid asynchronously, burned once settled |
 | one   | no   | no       | rotate: burned, fresh `k1'` of the same value returned    |
 | many  | no   | yes      | split: all burned, response carries `k1` (amount) + `change` |
 | many  | no   | –        | merge: all burned, one note worth the sum returned        |
@@ -38,13 +38,18 @@ query param if present, notes may encode a wallet-declared value in their URL
 (`?k1=...&amount=...`) for offline display, but it is never authoritative;
 `maxWithdrawable` is.
 
-Per the spec, a melted `k1` MUST NOT be burned until its outgoing payment
-actually settles, so while a payment is in flight its note is only reserved
-(`pending`), not yet burned - any other callback naming that `k1` (another
-melt, a rotate, a split, a merge) fails with `{"status": "ERROR", "reason":
-"pending"}` until it resolves, at which point the note is either burned for
-good (payment settled) or released back to outstanding (payment confirmed
-failed).
+Per the spec, `/w/cb` replies `{"status": "OK"}` for a melt as soon as the note
+is reserved, then pays `pr` asynchronously in the background - it does not wait
+for the outgoing payment to settle before responding. A melted `k1` MUST NOT be
+burned until that payment actually settles, so for the duration of the (now
+backgrounded) payment attempt its note is only reserved (`pending`), not yet
+burned - any other callback naming that `k1` (another melt, a rotate, a split,
+a merge) fails with `{"status": "ERROR", "reason": "pending"}` until it
+resolves, at which point the note is either burned for good (payment settled)
+or released back to outstanding (payment confirmed failed). Since the initial
+response is sent before the payment is even attempted, a melt failure is never
+reported back through this callback - only observable as the note becoming
+spendable again.
 
 Per the spec's security considerations, no spendable secret is ever persisted: notes
 are stored keyed by `sha256(k1)`, for a minted note that is exactly the payment

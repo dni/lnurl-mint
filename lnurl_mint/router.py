@@ -1,11 +1,12 @@
 import json
+import logging
 import re
 from hashlib import sha256
 from http import HTTPStatus
 from urllib.parse import urlparse
 
 import bolt11
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
 from .config import settings
 from .db import PendingNoteError, notes
@@ -43,32 +44,32 @@ def _funding_source() -> LightningBackendConfig:
     return funding_source
 
 
-async def _melt(note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11) -> WithdrawSuccessResponse:
-    """Pay `pr` from `note_ids`, which the caller (get_withdraw_callback)
-    has already reserved via NoteStore.mark_pending. Finalizes the burn
-    (NoteStore.finalize_melt) once the payment is confirmed settled - or,
-    when its outcome can't be confirmed either way, assumed settled to
-    avoid the risk of paying it out twice on a retry. Every other path out
-    of this function - including an exception this doesn't itself raise as
-    an HTTPException - leaves the notes merely pending, still burnable
-    later or restorable by the caller.
+async def _melt_pay(
+    note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11, funding_source: LightningBackendConfig
+) -> None:
+    """Pays `pr` from `note_ids`, which the caller (get_withdraw_callback)
+    has already validated and reserved via NoteStore.mark_pending - *after*
+    that caller has already replied {"status": "OK"} to the wallet. Per
+    LUD-03 step 6, SERVICE responds immediately and only then attempts the
+    payment asynchronously, so this runs as a FastAPI BackgroundTask and
+    has no way left to report back to the wallet: every path below must
+    itself decide finalize (NoteStore.finalize_melt, burns the notes for
+    good) vs. restore (NoteStore.restore, leaves them outstanding again),
+    never raise. A failure only a wallet-visible retry could otherwise fix
+    (e.g. paying a completely different invoice) has no such mechanism
+    here - the wallet learns of a failed melt only by its own invoice never
+    getting paid, per spec.
+
+    Finalizes once the payment is confirmed settled - or, when its outcome
+    can't be confirmed either way, assumed settled to avoid the risk of
+    paying it out twice on a retry (see the ambiguous-failure handling
+    below).
 
     A PaymentFailed from pay_invoice is the funding source's own
     definitive answer that nothing was paid (a clean routing/RPC failure,
-    not a dropped connection) - reported immediately with its clean reason
-    text, skipping the fallback is_payment_complete check below entirely,
-    since there's nothing ambiguous left to confirm."""
-    # `pr` is itself an invoice this same mint issued via /p/cb (pending or
-    # already settled/minted) - reject outright rather than paying it.
-    # Paying it over Lightning would just be the funding source routing a
-    # payment back to itself, which real nodes handle inconsistently (some
-    # reject it as a cycle, some accept it at face value); notes.mint_pr
-    # matches regardless of settlement status, since this mint issued the
-    # invoice either way.
-    if decoded.has_payment_hash and notes.mint_pr(decoded.payment_hash) is not None:
-        raise HTTPException(HTTPStatus.BAD_REQUEST, "Cannot melt into an invoice this mint issued itself.")
-
-    funding_source = _funding_source()
+    not a dropped connection) - restored immediately, skipping the
+    fallback is_payment_complete check below entirely, since there's
+    nothing ambiguous left to confirm."""
     # notes stay merely "pending" (not yet burned) for the duration of the
     # payment attempt - per the spec, SERVICE MUST NOT burn a melted k1
     # until the outgoing payment actually settles. A failed payment leaves
@@ -84,23 +85,28 @@ async def _melt(note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11) -> W
     try:
         await pay_invoice(pr, funding_source)
     except PaymentFailed as exc:
-        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
+        logging.info("melt %s: not paid (%s) - restoring", note_ids, exc)
+        notes.restore(note_ids)
+        return
     except Exception as exc:
         if not decoded.has_payment_hash:
+            logging.error("melt %s: error paying invoice, nothing to confirm against - burning: %s", note_ids, exc)
             notes.finalize_melt(note_ids)
-            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+            return
         try:
             completed = await is_payment_complete(decoded.payment_hash, funding_source)
         except Exception:
+            logging.error("melt %s: could not confirm payment status - burning: %s", note_ids, exc)
             notes.finalize_melt(note_ids)
-            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}") from exc
+            return
         if not completed:
-            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error paying invoice: {exc!s}")
+            logging.info("melt %s: confirmed not paid (%s) - restoring", note_ids, exc)
+            notes.restore(note_ids)
+            return
         notes.finalize_melt(note_ids)
-        return WithdrawSuccessResponse()
+        return
 
     notes.finalize_melt(note_ids)
-    return WithdrawSuccessResponse()
 
 
 def _note_id(k1: str) -> str:
@@ -297,18 +303,21 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
 
 @router.get("/w/cb", tags=["lnurlcash"])
 async def get_withdraw_callback(
-    k1: list[str] = Query(...), pr: str | None = None, amount: int | None = None
+    background_tasks: BackgroundTasks, k1: list[str] = Query(...), pr: str | None = None, amount: int | None = None
 ) -> WithdrawSuccessResponse:
     """The lnurlcash callback - LUD-03 melt semantics, extended:
 
     - single k1 + pr: melt - the note is reserved (see NoteStore.
-      mark_pending) while `pr` (of exactly its value) gets paid, then
-      burned for good once that payment settles. Plain {"status": "OK"}.
-      `pr` MUST NOT be combined with multiple k1s or with `amount` - merge
-      (or split) first. If `pr` is itself an invoice this same mint issued
-      (see create_mint), pending or already settled, the melt is rejected
-      outright rather than attempting a Lightning payment back to the
-      mint's own node.
+      mark_pending) while `pr` (of exactly its value) gets paid. Per LUD-03
+      step 6, this replies {"status": "OK"} as soon as the request itself
+      is validated and the note reserved, then pays `pr` asynchronously in
+      the background (see _melt_pay) - burned for good once that payment
+      settles, released again if it definitively fails. `pr` MUST NOT be
+      combined with multiple k1s or with `amount` - merge (or split)
+      first. If `pr` is itself an invoice this same mint issued (see
+      create_mint), pending or already settled, the melt is rejected
+      outright (synchronously - no payment is ever attempted) rather than
+      paying it back to the mint's own node.
     - one k1, no pr, no amount: rotate - burned and replaced by a fresh
       note of the same value.
     - many k1 + amount, no pr: split - all burned; `k1` in the response
@@ -347,29 +356,32 @@ async def get_withdraw_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invalid invoice: {exc!s}")
         if decoded.amount_msat != total_msat:
             raise HTTPException(HTTPStatus.BAD_REQUEST, f"Invoice must be for exactly {total_msat} msat.")
+        # `pr` is itself an invoice this same mint issued via /p/cb (pending
+        # or already settled/minted) - reject outright rather than paying
+        # it. Paying it over Lightning would just be the funding source
+        # routing a payment back to itself, which real nodes handle
+        # inconsistently (some reject it as a cycle, some accept it at face
+        # value); notes.mint_pr matches regardless of settlement status,
+        # since this mint issued the invoice either way. Checked - and
+        # rejected synchronously, unlike the actual payment below - because
+        # it's a cheap local lookup, not a Lightning round-trip.
+        if decoded.has_payment_hash and notes.mint_pr(decoded.payment_hash) is not None:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "Cannot melt into an invoice this mint issued itself.")
+
+        funding_source = _funding_source()
 
         try:
             notes.mark_pending(note_ids)
         except PendingNoteError:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
 
-        try:
-            return await _melt(note_ids, pr, decoded)
-        except BaseException:
-            # whatever went wrong below - a misconfigured funding source, an
-            # unreachable node, a database hiccup, even this request getting
-            # cancelled (a client timeout mid-payment raises
-            # asyncio.CancelledError, a BaseException that a plain `except
-            # Exception` - including the outer error handler's - would NOT
-            # catch) - must release the reservation rather than strand these
-            # notes in "pending" forever with no payment definitively
-            # attempted. _melt itself finalizes (burns) the notes before
-            # returning successfully, or before raising in the cases where
-            # the payment might actually have gone through - restoring
-            # afterward in those cases is a harmless no-op, they're already
-            # spent=1 and restore only ever touches the pending flag.
-            notes.restore(note_ids)
-            raise
+        # per LUD-03 step 6, SERVICE replies {"status": "OK"} here and only
+        # then attempts the payment asynchronously - _melt_pay runs as a
+        # background task after this response has already gone out, so it
+        # has no way left to report a failure back to the wallet (see its
+        # docstring)
+        background_tasks.add_task(_melt_pay, note_ids, pr, decoded, funding_source)
+        return WithdrawSuccessResponse()
 
     try:
         if amount is not None:
