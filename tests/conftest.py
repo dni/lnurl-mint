@@ -27,7 +27,7 @@ import lnurl_mint.frontend as frontend_module
 import lnurl_mint.router as router_module
 import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
-from lnurl_mint.node import NodeInfo
+from lnurl_mint.node import NodeInfo, PaymentFailed
 from lnurl_mint.server import app
 
 
@@ -51,12 +51,18 @@ class FakeNode:
         self.preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for invoice_preimage
         self.paid: list[str] = []
         self.fail_payments = False
+        # for simulating a *definitive* pay_invoice failure - the funding
+        # source cleanly reported the payment did not go through (e.g. no
+        # route), so melt should restore immediately without the fallback
+        # is_payment_complete check
+        self.fail_reason: str | None = None
         # for simulating an *ambiguous* pay_invoice failure - the funding
         # source secretly completed the payment despite pay_invoice raising
         # (e.g. the response was lost) - vs. the confirmation check itself
         # being unable to tell either way
         self.payment_actually_completed = False
         self.is_payment_complete_raises = False
+        self.is_payment_complete_called = False
         # seconds to block inside pay_invoice before resolving - simulates
         # an in-flight payment for tests of the melt "pending" lock, which
         # otherwise has no observable window in a single-threaded test
@@ -89,12 +95,15 @@ class FakeNode:
     async def pay_invoice(self, invoice: str, config) -> bytes:
         if self.pay_delay:
             await asyncio.sleep(self.pay_delay)
+        if self.fail_reason is not None:
+            raise PaymentFailed(self.fail_reason)
         if self.fail_payments:
             raise ValueError("Payment failed: no route.")
         self.paid.append(invoice)
         return urandom(32)
 
     async def is_payment_complete(self, payment_hash: str, config) -> bool:
+        self.is_payment_complete_called = True
         if self.is_payment_complete_raises:
             raise ConnectionError("funding source unreachable")
         return self.payment_actually_completed

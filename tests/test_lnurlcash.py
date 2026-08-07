@@ -174,6 +174,24 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
     assert note_value(client, k1) == 5000
 
 
+def test_definite_payment_failure_restores_immediately_with_a_clean_reason(
+    client: TestClient, node: FakeNode, mint_note
+):
+    # a routing failure is the funding source's own definitive answer, not
+    # an ambiguous one - melt should report the clean reason text as-is and
+    # restore the note right away, without even calling the fallback
+    # is_payment_complete check
+    k1 = mint_note(5000)
+    node.fail_reason = "Could not find a route to pay this invoice."
+    pr = fake_invoice(5000)
+
+    response = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+
+    assert response == {"status": "ERROR", "reason": "Could not find a route to pay this invoice."}
+    assert note_value(client, k1) == 5000
+    assert node.is_payment_complete_called is False
+
+
 def test_pending_note_is_released_if_funding_source_becomes_unavailable(
     client: TestClient, node: FakeNode, mint_note, monkeypatch
 ):

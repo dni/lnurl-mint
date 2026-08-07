@@ -32,6 +32,18 @@ async def _raise_for_status(res: httpx.Response) -> None:
         raise httpx.HTTPStatusError(f"{exc}: {body}", request=exc.request, response=exc.response) from exc
 
 
+class PaymentFailed(Exception):
+    """Raised by pay_invoice only when the funding source gave a clean,
+    definitive answer that the payment did NOT go through (a routing
+    failure, a rejected/expired invoice, ...) - as opposed to a dropped
+    connection, our own timeout, or a malformed response, where it's
+    unclear whether the payment actually went out (those stay as plain
+    ValueError/httpx exceptions). router.py's melt path uses this
+    distinction to restore a failed melt's notes immediately, without its
+    fallback is_payment_complete check, and to report `str(exc)` as a
+    clean reason instead of a wrapped exception dump."""
+
+
 class LightningBackendConfig(BaseModel):
     """This mint's own funding source backend and credentials (configured
     once by the operator - see config.Settings.funding_source). Only the
@@ -198,9 +210,15 @@ async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: Lightn
                 if payment.get("status") in ("SUCCEEDED", "FAILED"):
                     break
 
-    if not payment or payment.get("status") != "SUCCEEDED":
-        reason = (payment or {}).get("failure_reason", "unknown error")
-        raise ValueError(f"Payment failed: {reason}")
+    if not payment:
+        # the stream ended without ever reaching a terminal SUCCEEDED/FAILED
+        # event (dropped connection, ...) - genuinely ambiguous, not lnd
+        # giving us a definitive answer
+        raise ValueError("lnd did not report a terminal payment status.")
+    if payment.get("status") != "SUCCEEDED":
+        # a terminal FAILED event IS lnd's definitive answer - no htlc is
+        # left in flight once it reports this
+        raise PaymentFailed(_lnd_failure_reason(payment.get("failure_reason", "FAILURE_REASON_ERROR")))
 
     preimage_hex = payment.get("payment_preimage")
     if not preimage_hex:
@@ -208,6 +226,18 @@ async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: Lightn
     preimage = _decode_hex_or_base64(preimage_hex)
     _verify_preimage(preimage, invoice)
     return preimage
+
+
+_LND_FAILURE_REASONS = {
+    "FAILURE_REASON_NO_ROUTE": "Could not find a route to pay this invoice.",
+    "FAILURE_REASON_INCORRECT_PAYMENT_DETAILS": "The invoice's payment details were rejected.",
+    "FAILURE_REASON_INSUFFICIENT_BALANCE": "Insufficient balance to pay this invoice.",
+    "FAILURE_REASON_TIMEOUT": "Timed out trying to find a route to pay this invoice.",
+}
+
+
+def _lnd_failure_reason(reason: str) -> str:
+    return _LND_FAILURE_REASONS.get(reason, f"Payment failed: {reason}.")
 
 
 async def _is_payment_complete_lnd(payment_hash: str, url: str, macaroon: str, config: LightningBackendConfig) -> bool:
@@ -304,13 +334,21 @@ async def _create_invoice_cln(
 
 
 async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningBackendConfig) -> bytes:
-    async with httpx.AsyncClient(verify=config.verify, timeout=60.0) as client:
-        res = await client.post(f"{url}/v1/pay", headers={"Rune": rune}, json={"bolt11": invoice})
-        await _raise_for_status(res)
+    # xpay (CLN's newer payment engine, superseding the legacy `pay`) only
+    # ever resolves once every part has been individually settled or given
+    # up on - a non-2xx response is therefore always cln's own definitive
+    # answer that nothing was paid, never a "some htlc might still be in
+    # flight" ambiguity. timeout is kept comfortably above xpay's own
+    # default 60s retry_for so our client doesn't time out right as xpay is
+    # about to answer, which would otherwise turn a definitive failure into
+    # an ambiguous one.
+    async with httpx.AsyncClient(verify=config.verify, timeout=90.0) as client:
+        res = await client.post(f"{url}/v1/xpay", headers={"Rune": rune}, json={"invstring": invoice})
+        try:
+            await _raise_for_status(res)
+        except httpx.HTTPStatusError as exc:
+            raise PaymentFailed(_cln_pay_failure_reason(res)) from exc
         payment = res.json()
-
-    if payment.get("status") != "complete":
-        raise ValueError(f"Payment failed: {payment.get('status', 'unknown error')}")
 
     preimage_hex = payment.get("payment_preimage")
     if not preimage_hex:
@@ -318,6 +356,24 @@ async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningB
     preimage = _decode_hex_or_base64(preimage_hex)
     _verify_preimage(preimage, invoice)
     return preimage
+
+
+# xpay's documented failure codes - https://docs.corelightning.org/reference/xpay
+_CLN_PAY_FAILURE_REASONS = {
+    203: "The invoice's destination permanently rejected this payment.",
+    205: "Could not find a route to pay this invoice.",
+    207: "This invoice has expired.",
+    219: "This invoice has already been paid.",
+}
+
+
+def _cln_pay_failure_reason(res: httpx.Response) -> str:
+    try:
+        body = res.json()
+    except ValueError:
+        return f"Payment failed ({res.status_code})."
+    code, message = body.get("code"), body.get("message")
+    return _CLN_PAY_FAILURE_REASONS.get(code, message or f"Payment failed ({res.status_code}).")
 
 
 async def _is_payment_complete_cln(payment_hash: str, url: str, rune: str, config: LightningBackendConfig) -> bool:

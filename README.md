@@ -108,16 +108,16 @@ Configure the funding source via `.env` (see `.env.example`), lnd or cln REST.
 Without one, minting and melting are unavailable (rotate/split/merge of existing
 notes still work).
 
-**cln rune**: this mint only ever calls `invoice`, `pay`, `signmessage`,
-`listinvoices` and `getinfo` (see `node.py`), so scope `FUNDINGSOURCE_RUNE` to
-just those instead of handing it a full-access rune:
+**cln rune**: this mint only ever calls `invoice`, `xpay`, `signmessage`,
+`listinvoices`, `listpays` and `getinfo` (see `node.py`), so scope
+`FUNDINGSOURCE_RUNE` to just those instead of handing it a full-access rune:
 
 ```sh
-lightning-cli createrune restrictions='[["method=invoice","method=pay","method=signmessage","method=listinvoices","method=getinfo"]]'
+lightning-cli createrune restrictions='[["method=invoice","method=xpay","method=signmessage","method=listinvoices","method=listpays","method=getinfo"]]'
 ```
 
 The command's JSON output's `rune` field is the value for `FUNDINGSOURCE_RUNE`.
-The single `[...]` restriction is an OR list (any of these five methods, and
+The single `[...]` restriction is an OR list (any of these six methods, and
 nothing else) - a comma-separated top-level list instead would AND further
 restrictions on top (e.g. `pnum=0` to also disallow all requests with
 parameters).

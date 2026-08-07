@@ -19,6 +19,7 @@ from .models import (
 )
 from .node import (
     LightningBackendConfig,
+    PaymentFailed,
     create_invoice,
     invoice_preimage,
     is_invoice_settled,
@@ -50,7 +51,13 @@ async def _melt(note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11) -> W
     avoid the risk of paying it out twice on a retry. Every other path out
     of this function - including an exception this doesn't itself raise as
     an HTTPException - leaves the notes merely pending, still burnable
-    later or restorable by the caller."""
+    later or restorable by the caller.
+
+    A PaymentFailed from pay_invoice is the funding source's own
+    definitive answer that nothing was paid (a clean routing/RPC failure,
+    not a dropped connection) - reported immediately with its clean reason
+    text, skipping the fallback is_payment_complete check below entirely,
+    since there's nothing ambiguous left to confirm."""
     # self-payment: `pr` is itself a still-outstanding invoice this same
     # mint issued via /p/cb. Paying it over Lightning would just be the
     # funding source routing a payment back to itself, so settle it
@@ -81,6 +88,8 @@ async def _melt(note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11) -> W
     # finalized as burned rather than risk a double payout.
     try:
         await pay_invoice(pr, funding_source)
+    except PaymentFailed as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     except Exception as exc:
         if not decoded.has_payment_hash:
             notes.finalize_melt(note_ids)
