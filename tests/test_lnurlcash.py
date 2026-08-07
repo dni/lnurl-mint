@@ -214,39 +214,37 @@ def test_pending_note_is_released_if_funding_source_becomes_unavailable(
     assert client.get(f"/w/cb?k1={k1}").json()["status"] == "OK"
 
 
-def test_melt_to_own_pending_invoice_settles_without_paying_the_node(client: TestClient, node: FakeNode, mint_note):
+def test_melt_rejects_own_pending_invoice(client: TestClient, node: FakeNode, mint_note):
     # melting straight into an invoice this same mint issued (and hasn't
-    # settled yet) shouldn't round-trip through the node at all - it's
-    # settled locally, and the new invoice's preimage becomes a spendable
-    # note exactly as if it had been paid for real
+    # settled yet) is rejected outright - it must not be paid over
+    # Lightning (a self-payment to our own node) nor settled as a shortcut
     k1 = mint_note(5000)
     response = client.get("/p/cb?amount=5000")
     pr = response.json()["pr"]
     new_k1 = node.last_preimage.hex()
 
-    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
 
-    assert node.paid == []  # no real Lightning payment was attempted
-    assert note_value(client, k1) is None
-    assert note_value(client, new_k1) == 5000
+    assert node.paid == []
+    assert note_value(client, k1) == 5000  # note untouched, still spendable
+    assert note_value(client, new_k1) is None  # the own invoice never got settled
 
 
-def test_melt_to_already_settled_own_invoice_falls_back_to_paying_it(client: TestClient, node: FakeNode, mint_note):
-    # if the target invoice is one of ours but already settled (e.g. someone
-    # else genuinely paid it first), the shortcut doesn't apply - it's no
-    # longer "pending", so this behaves like paying any other invoice
+def test_melt_rejects_already_settled_own_invoice(client: TestClient, node: FakeNode, mint_note):
+    # same rejection applies once the invoice is already settled/minted -
+    # this mint issued it either way, so it's still "an invoice we created
+    # ourselves"
     k1 = mint_note(5000)
     settled_k1 = mint_note(5000)
     # mint_note only settles at the (fake) node - force this mint to
-    # actually observe and record that settlement (minted=1) before melting
-    # into it, so the shortcut correctly sees it as no longer pending
+    # actually observe and record that settlement (minted=1)
     assert note_value(client, settled_k1) == 5000
     pr = fake_invoice(5000, sha256(bytes.fromhex(settled_k1)).hexdigest())
 
-    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
 
-    assert node.paid == [pr]
-    assert note_value(client, k1) is None
+    assert node.paid == []
+    assert note_value(client, k1) == 5000
 
 
 def test_ambiguously_failed_payment_that_actually_succeeded_does_not_restore(

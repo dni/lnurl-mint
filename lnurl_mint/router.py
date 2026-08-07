@@ -58,20 +58,15 @@ async def _melt(note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11) -> W
     not a dropped connection) - reported immediately with its clean reason
     text, skipping the fallback is_payment_complete check below entirely,
     since there's nothing ambiguous left to confirm."""
-    # self-payment: `pr` is itself a still-outstanding invoice this same
-    # mint issued via /p/cb. Paying it over Lightning would just be the
-    # funding source routing a payment back to itself, so settle it
-    # directly instead: burn these notes and mark that invoice's
-    # payment_hash minted, atomically, with no Lightning round-trip.
-    # Whoever holds *that* invoice's preimage can then redeem the note it
-    # produces exactly as if it had been paid for real.
-    if decoded.has_payment_hash and notes.pending_mint(decoded.payment_hash) is not None:
-        if notes.settle_mint(decoded.payment_hash) is None:
-            # lost the race - a real payment or a concurrent self-payment
-            # settled this same invoice first
-            raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, "Invoice already settled.")
-        notes.finalize_melt(note_ids)
-        return WithdrawSuccessResponse()
+    # `pr` is itself an invoice this same mint issued via /p/cb (pending or
+    # already settled/minted) - reject outright rather than paying it.
+    # Paying it over Lightning would just be the funding source routing a
+    # payment back to itself, which real nodes handle inconsistently (some
+    # reject it as a cycle, some accept it at face value); notes.mint_pr
+    # matches regardless of settlement status, since this mint issued the
+    # invoice either way.
+    if decoded.has_payment_hash and notes.mint_pr(decoded.payment_hash) is not None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Cannot melt into an invoice this mint issued itself.")
 
     funding_source = _funding_source()
     # notes stay merely "pending" (not yet burned) for the duration of the
@@ -310,12 +305,10 @@ async def get_withdraw_callback(
       mark_pending) while `pr` (of exactly its value) gets paid, then
       burned for good once that payment settles. Plain {"status": "OK"}.
       `pr` MUST NOT be combined with multiple k1s or with `amount` - merge
-      (or split) first. If `pr` is itself a still-outstanding invoice this
-      same mint issued (see create_mint), it's settled directly instead of
-      actually being paid over Lightning - functionally a rotate reached
-      via payRequest/withdrawRequest instead of the dedicated rotate
-      callback, without the pointless fee and failure exposure of a node
-      paying itself.
+      (or split) first. If `pr` is itself an invoice this same mint issued
+      (see create_mint), pending or already settled, the melt is rejected
+      outright rather than attempting a Lightning payment back to the
+      mint's own node.
     - one k1, no pr, no amount: rotate - burned and replaced by a fresh
       note of the same value.
     - many k1 + amount, no pr: split - all burned; `k1` in the response
