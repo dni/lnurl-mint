@@ -337,6 +337,9 @@ async def get_withdraw_callback(
     the funding source node's own key - see signing.sign_note; the fields
     are simply omitted if no funding source is configured or signing fails
     for any other reason."""
+    if len(k1) > settings.max_k1s:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, f"Too many k1s (max {settings.max_k1s}).")
+
     if pr is not None and (len(k1) > 1 or amount is not None):
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, "pr cannot be combined with multiple k1s or amount - merge or split first."

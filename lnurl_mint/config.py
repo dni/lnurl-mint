@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     min_sendable_msat: int = 1000
     max_sendable_msat: int = 1_000_000_000
 
+    # cap on the number of k1s a single /w/cb request (melt/rotate/split/
+    # merge) may name - well above any real wallet's outstanding note count
+    # (one holding more consolidates across multiple requests), just to
+    # bound the DB lookups - and query-string size - a single
+    # unauthenticated request can force
+    max_k1s: int = 100
+
     database_path: str = "mint.db"
 
     # LUD-21 (optional): advertise a `verify` URL in /p/cb's response, so a
@@ -54,8 +61,12 @@ class Settings(BaseSettings):
     description: str = "A minimal lnurlcash mint - pay the QR code to mint a Lightning bearer note."
     # public base URL of this mint (e.g. https://mint.example) - used for the
     # QR code's LNURL, the lightning address domain, and the LUD-16 metadata
-    # identifier. Falls back to each request's own base URL when unset.
-    base_url: str | None = None
+    # identifier. Required, not derived from a request's own Host header:
+    # trusting that would let whoever sends the request (or, behind a cache
+    # that doesn't vary on Host, an attacker poisoning a cached response for
+    # other visitors) control the callback/withdrawLink URLs handed back to
+    # a wallet.
+    base_url: str
     # this mint's Tor hidden service address (e.g. http://<v3-address>.onion),
     # if it has one - advertised on the frontend one-pager as an alternative
     # way to reach it (see frontend.py). If a wallet is actually connecting
@@ -75,7 +86,7 @@ class Settings(BaseSettings):
             onion_host = urlparse(self.onion_url).hostname or ""
             if request_host and request_host == onion_host:
                 return self.onion_url.rstrip("/")
-        return (self.base_url or request_base_url).rstrip("/")
+        return self.base_url.rstrip("/")
 
     def funding_source(self) -> LightningBackendConfig:
         return LightningBackendConfig(

@@ -16,13 +16,17 @@ def test_public_base_url_prefers_onion_for_matching_host(monkeypatch):
 
 def test_public_base_url_ignores_onion_for_other_hosts(monkeypatch):
     monkeypatch.setattr(settings, "onion_url", ONION)
-    monkeypatch.setattr(settings, "base_url", None)
-    assert settings.public_base_url("http://clearnet.example/") == "http://clearnet.example"
+    monkeypatch.setattr(settings, "base_url", "https://mint.example")
+    assert settings.public_base_url("http://clearnet.example/") == "https://mint.example"
 
 
-def test_public_base_url_falls_back_when_onion_unset(monkeypatch):
+def test_public_base_url_ignores_request_when_onion_unset(monkeypatch):
     monkeypatch.setattr(settings, "onion_url", None)
-    assert settings.public_base_url("http://clearnet.example/") == "http://clearnet.example"
+    monkeypatch.setattr(settings, "base_url", "https://mint.example")
+    # base_url is required and never derived from the request's own Host
+    # header (see config.py) - a request for a completely different host
+    # still gets the fixed base_url
+    assert settings.public_base_url("http://clearnet.example/") == "https://mint.example"
 
 
 def test_public_base_url_still_prefers_base_url_over_request(monkeypatch):

@@ -293,6 +293,12 @@ def test_duplicate_k1_cannot_be_double_counted(client: TestClient, mint_note):
     assert note_value(client, k1) == 5000
 
 
+def test_too_many_k1s_is_rejected(client: TestClient):
+    query = "&".join(f"k1={urandom(32).hex()}" for _ in range(settings.max_k1s + 1))
+    result = client.get(f"/w/cb?{query}").json()
+    assert result == {"status": "ERROR", "reason": f"Too many k1s (max {settings.max_k1s})."}
+
+
 def test_amount_cannot_be_combined_with_pr(client: TestClient, mint_note):
     k1 = mint_note(5000)
     pr = fake_invoice(2000)

@@ -10,6 +10,10 @@ import tempfile
 # that file contains.
 os.environ["DATABASE_PATH"] = os.path.join(tempfile.mkdtemp(), "test.db")
 os.environ["LNURL_MINT_ENV_FILE"] = os.path.join(tempfile.mkdtemp(), "unused.env")
+# base_url is a required setting (see config.py) - matches TestClient's own
+# default host, so the many assertions elsewhere that expect "testserver"
+# keep working unchanged
+os.environ["BASE_URL"] = "http://testserver"
 
 import asyncio
 import time
