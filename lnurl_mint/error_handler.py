@@ -1,4 +1,3 @@
-import logging
 from http import HTTPStatus
 from typing import Any, Callable, Sequence
 
@@ -6,6 +5,8 @@ from fastapi import HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+
+from .errors import log_internal_error
 
 
 def _error(reason: str) -> JSONResponse:
@@ -40,7 +41,10 @@ class LnurlErrorResponseHandler(APIRoute):
                 prefix = "Request" if isinstance(exc, RequestValidationError) else "Response"
                 return _error(f"{prefix} validation error: {validation_errors_to_string(exc.errors())}.")
             except Exception as exc:
-                logging.error(exc, exc_info=True)
-                return _error(f"{exc!s}")
+                # exc's own text is never handed back on the wire - it may
+                # carry internal details (backend error bodies, connection
+                # info, database errors, ...) - only a reference id is,
+                # logged to error.log for whoever needs to look it up
+                return _error(log_internal_error("Internal error", exc))
 
         return lnurl_route_handler

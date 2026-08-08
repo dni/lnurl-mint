@@ -11,6 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from .config import settings
 from .db import PendingNoteError, notes
 from .error_handler import LnurlErrorResponseHandler
+from .errors import log_internal_error
 from .models import (
     LnurlPayActionResponse,
     LnurlPayResponse,
@@ -228,7 +229,9 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
     try:
         pr, preimage = await create_invoice(amount, funding_source)
     except Exception as exc:
-        raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f"Error creating invoice: {exc!s}")
+        # exc's own text (backend error bodies, connection info, ...) is
+        # never handed back on the wire - see log_internal_error
+        raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, log_internal_error("Error creating invoice", exc))
     # the preimage (the future bearer secret) reaches the buyer through the
     # Lightning payment itself and is discarded here, per the spec's
     # storing-hashes-not-secrets guidance - only the payment hash and the
@@ -374,6 +377,11 @@ async def get_withdraw_callback(
             notes.mark_pending(note_ids)
         except PendingNoteError:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
+        except ValueError as exc:
+            # a note resolved fine above but lost a race with a concurrent
+            # request before it could be reserved - same known-safe message
+            # _resolve_note itself uses, not an internal error
+            raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
 
         # per LUD-03 step 6, SERVICE replies {"status": "OK"} here and only
         # then attempts the payment asynchronously - _melt_pay runs as a
@@ -402,3 +410,8 @@ async def get_withdraw_callback(
         )
     except PendingNoteError:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
+    except ValueError as exc:
+        # a note resolved fine above but lost a race with a concurrent
+        # request before it could be burned - same known-safe message
+        # _resolve_note itself uses, not an internal error
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))

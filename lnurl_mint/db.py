@@ -4,6 +4,7 @@ from hashlib import sha256
 from os import urandom
 
 from .config import settings
+from .errors import log_internal_error
 
 
 class PendingNoteError(Exception):
@@ -156,7 +157,9 @@ class NoteStore:
                         note_id = sha256(bytes.fromhex(k1)).hexdigest()
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
             except sqlite3.Error as exc:
-                raise ValueError(f"Note swap failed: {exc!s}") from exc
+                # exc's own text (raw sqlite3 error) is never handed back on
+                # the wire - see log_internal_error
+                raise ValueError(log_internal_error("Note swap failed", exc)) from exc
         return new_k1s
 
     def mark_pending(self, note_ids: list[str]) -> None:
