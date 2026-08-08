@@ -62,6 +62,18 @@ LUD-03 `k1` would, this mint disables uvicorn's per-request access log entirely
 (see `server.py`'s lifespan) rather than leave secrets in server logs by default;
 run it behind a reverse proxy if you want access logs for the other routes.
 
+**Mint fee** (optional): set `BASE_FEE_MSAT`/`FEE_PERCENT_PPM` to withhold a
+flat amount plus a parts-per-million cut of every mint's `amount`, credited
+to `k1=P`'s note instead of the full amount paid - meant to cover the
+routing cost of eventually paying that note back out on melt. Advertised as
+an extra `["text/plain", "Mint fees: <base_fee_msat>,<fee_percent_ppm>"]`
+entry in `/p`'s `metadata`, so a wallet that recognizes the `Mint fees: `
+prefix can warn the payer up front; omitted entirely (assumed fee-free per
+spec) when both are `0`. `MIN_MINT_MSAT` (default 10 sats) floors the note's
+value net of this fee - not `amount` itself, which `MIN_SENDABLE_MSAT`
+already bounds - so a mint too small to net a note worth minting is rejected
+by `/p/cb` before an invoice is even created.
+
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key
 it signs BOLT-11 invoices with - and rotate/split/merge responses carry a

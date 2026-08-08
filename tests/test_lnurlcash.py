@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from hashlib import sha256
@@ -43,6 +44,56 @@ def test_paid_invoice_preimage_becomes_a_bearer_note(client: TestClient, node: F
 def test_pay_callback_enforces_sendable_bounds(client: TestClient):
     assert client.get("/p/cb?amount=1").json()["status"] == "ERROR"
     assert client.get("/p/cb?amount=999999999999").json()["status"] == "ERROR"
+
+
+def test_pay_response_omits_mint_fee_when_free(client: TestClient):
+    metadata = client.get("/p").json()["metadata"]
+    assert "Mint fees:" not in metadata
+
+
+def test_pay_response_advertises_mint_fee_when_configured(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "base_fee_msat", 1000)
+    monkeypatch.setattr(settings, "fee_percent_ppm", 2000)
+    metadata = client.get("/p").json()["metadata"]
+    assert ["text/plain", "Mint fees: 1000,2000"] in json.loads(metadata)
+
+
+def test_mint_credits_note_net_of_configured_fee(client: TestClient, node: FakeNode, monkeypatch):
+    monkeypatch.setattr(settings, "base_fee_msat", 1000)
+    monkeypatch.setattr(settings, "fee_percent_ppm", 2000)  # 0.2%
+
+    client.get("/p/cb?amount=100000")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+
+    # 1000 flat + 0.2% of 100000 = 1000 + 200 = 1200 withheld
+    assert note_value(client, node.last_preimage.hex()) == 100000 - 1200
+
+
+def test_pay_callback_rejects_amount_that_cannot_cover_the_fee(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "base_fee_msat", settings.min_sendable_msat + 1)
+    result = client.get(f"/p/cb?amount={settings.min_sendable_msat}").json()
+    assert result == {
+        "status": "ERROR",
+        "reason": "Amount too low to mint a note (min 0 msat net of fees).",
+    }
+
+
+def test_pay_callback_rejects_amount_below_min_mint(client: TestClient, monkeypatch):
+    # amount clears MIN_SENDABLE_MSAT (the gross, pre-fee bound) but still
+    # can't net a note worth MIN_MINT_MSAT once fee-free amount == net
+    monkeypatch.setattr(settings, "min_mint_msat", 10_000)
+    result = client.get(f"/p/cb?amount={settings.min_sendable_msat}").json()
+    assert result == {
+        "status": "ERROR",
+        "reason": "Amount too low to mint a note (min 10000 msat net of fees).",
+    }
+
+
+def test_mint_succeeds_at_exactly_min_mint(client: TestClient, node: FakeNode, monkeypatch):
+    monkeypatch.setattr(settings, "min_mint_msat", 10_000)
+    client.get("/p/cb?amount=10000")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+    assert note_value(client, node.last_preimage.hex()) == 10000
 
 
 def test_rotate_burns_and_replaces_the_note(client: TestClient, mint_note):

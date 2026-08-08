@@ -177,15 +177,26 @@ async def _resolve_note(k1: str) -> tuple[str, int] | None:
     return (note_id, amount_msat) if amount_msat is not None else None
 
 
+def _mint_fee_msat(amount_msat: int) -> int:
+    """The fee withheld from a mint of `amount_msat` (LUD-XX's optional mint
+    fee): a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
+    amount paid, floored to the msat, matching the estimate a wallet derives
+    from the advertised `Mint fees: ` metadata entry (see _pay_response)."""
+    return settings.base_fee_msat + (amount_msat * settings.fee_percent_ppm) // 1_000_000
+
+
 def _pay_response(req: Request) -> LnurlPayResponse:
     base = settings.public_base_url(str(req.base_url))
     host = urlparse(base).hostname or req.url.hostname
-    metadata = json.dumps(
-        [
-            ["text/plain", f"Mint an lnurlcash bearer note on {host}"],
-            ["text/identifier", f"{settings.username}@{host}"],
-        ]
-    )
+    metadata_entries = [
+        ["text/plain", f"Mint an lnurlcash bearer note on {host}"],
+        ["text/identifier", f"{settings.username}@{host}"],
+    ]
+    if settings.base_fee_msat or settings.fee_percent_ppm:
+        # a SERVICE that omits this entry is assumed fee-free per spec, so
+        # it's only added when there's actually a fee to disclose
+        metadata_entries.append(["text/plain", f"Mint fees: {settings.base_fee_msat},{settings.fee_percent_ppm}"])
+    metadata = json.dumps(metadata_entries)
     return LnurlPayResponse(
         callback=f"{base}/p/cb",
         minSendable=settings.min_sendable_msat,
@@ -217,7 +228,8 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
 async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
     """LUD-06 callback: returns an invoice for `amount` msat whose preimage
     this mint generated itself (see node.create_invoice) - once the invoice
-    settles, that preimage is an outstanding bearer note worth `amount`.
+    settles, that preimage is an outstanding bearer note worth `amount`
+    minus the advertised mint fee, if any (see _mint_fee_msat).
 
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
     no node of its own poll settlement status - see verify_invoice."""
@@ -225,6 +237,11 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Amount too low.")
     if amount > settings.max_sendable_msat:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Amount too high.")
+    net_amount_msat = amount - _mint_fee_msat(amount)
+    if net_amount_msat < settings.min_mint_msat:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST, f"Amount too low to mint a note (min {settings.min_mint_msat} msat net of fees)."
+        )
     funding_source = _funding_source()
     try:
         pr, preimage = await create_invoice(amount, funding_source)
@@ -235,9 +252,11 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
     # the preimage (the future bearer secret) reaches the buyer through the
     # Lightning payment itself and is discarded here, per the spec's
     # storing-hashes-not-secrets guidance - only the payment hash and the
-    # invoice itself (for LUD-21 verify) are stored
+    # invoice itself (for LUD-21 verify) are stored. The invoice itself is
+    # for the full `amount` (what the payer actually pays); the note it
+    # produces is credited net of the mint fee.
     payment_hash = sha256(preimage).hexdigest()
-    notes.create_mint(payment_hash, pr, amount)
+    notes.create_mint(payment_hash, pr, net_amount_msat)
     verify = str(req.url_for("verify_invoice", payment_hash=payment_hash)) if settings.verify_enabled else None
     return LnurlPayActionResponse(pr=pr, verify=verify)
 

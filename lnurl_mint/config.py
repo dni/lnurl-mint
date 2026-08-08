@@ -38,8 +38,24 @@ class Settings(BaseSettings):
     fundingsource_cert_path: str | None = None
 
     # bounds on the value of a single minted note (LUD-06 min/maxSendable)
-    min_sendable_msat: int = 1000
+    min_sendable_msat: int = 10_000
     max_sendable_msat: int = 1_000_000_000
+
+    # LUD-XX's optional mint fee: withheld from every minted note's value
+    # (a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
+    # amount paid), meant to cover the routing cost of eventually paying
+    # the note back out on melt. Advertised in /p/cb's payRequest metadata
+    # (see router._pay_response) so a wallet can warn the payer up front -
+    # omitted from metadata entirely (assumed fee-free per spec) when both
+    # are zero.
+    base_fee_msat: int = 1000
+    fee_percent_ppm: int = 0
+
+    # floor on a note's value net of the mint fee (not on `amount` itself,
+    # which min_sendable_msat already bounds) - guards against minting
+    # dust-value notes not worth the routing cost of ever melting them.
+    # /p/cb rejects an `amount` that would net less than this after fees.
+    min_mint_msat: int = 10_000
 
     # cap on the number of k1s a single /w/cb request (melt/rotate/split/
     # merge) may name - well above any real wallet's outstanding note count
