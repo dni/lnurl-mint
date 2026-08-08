@@ -72,7 +72,10 @@ prefix can warn the payer up front; omitted entirely (assumed fee-free per
 spec) when both are `0`. `MIN_MINT_MSAT` (default 10 sats) floors the note's
 value net of this fee - not `amount` itself, which `MIN_SENDABLE_MSAT`
 already bounds - so a mint too small to net a note worth minting is rejected
-by `/p/cb` before an invoice is even created.
+by `/p/cb` before an invoice is even created. The computed fee is always
+rounded *up* to the nearest whole sat (never left at fractional-msat
+precision), so the mint is never short a sat versus the naive estimate a
+wallet derives from the metadata formula above.
 
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key

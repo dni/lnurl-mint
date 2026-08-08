@@ -180,9 +180,13 @@ async def _resolve_note(k1: str) -> tuple[str, int] | None:
 def _mint_fee_msat(amount_msat: int) -> int:
     """The fee withheld from a mint of `amount_msat` (LUD-XX's optional mint
     fee): a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
-    amount paid, floored to the msat, matching the estimate a wallet derives
-    from the advertised `Mint fees: ` metadata entry (see _pay_response)."""
-    return settings.base_fee_msat + (amount_msat * settings.fee_percent_ppm) // 1_000_000
+    amount paid, rounded *up* to the nearest whole sat - Lightning fees are
+    conventionally sat-denominated, and rounding up (rather than leaving a
+    fractional-sat msat remainder) means the mint is never short a sat,
+    matching or slightly exceeding the estimate a wallet derives from the
+    advertised `Mint fees: ` metadata entry (see _pay_response)."""
+    fee_msat = settings.base_fee_msat + (amount_msat * settings.fee_percent_ppm) // 1_000_000
+    return -(-fee_msat // 1000) * 1000
 
 
 def _pay_response(req: Request) -> LnurlPayResponse:

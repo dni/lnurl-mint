@@ -65,8 +65,21 @@ def test_mint_credits_note_net_of_configured_fee(client: TestClient, node: FakeN
     client.get("/p/cb?amount=100000")
     node.settled.add(sha256(node.last_preimage).hexdigest())
 
-    # 1000 flat + 0.2% of 100000 = 1000 + 200 = 1200 withheld
-    assert note_value(client, node.last_preimage.hex()) == 100000 - 1200
+    # 1000 flat + 0.2% of 100000 = 1000 + 200 = 1200, rounded up to the
+    # nearest whole sat (2000) - see test_mint_fee_rounds_up_to_the_nearest_sat
+    assert note_value(client, node.last_preimage.hex()) == 100000 - 2000
+
+
+def test_mint_fee_rounds_up_to_the_nearest_sat(client: TestClient, node: FakeNode, monkeypatch):
+    monkeypatch.setattr(settings, "base_fee_msat", 0)
+    monkeypatch.setattr(settings, "fee_percent_ppm", 1)  # 0.0001%
+
+    client.get("/p/cb?amount=100000000")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+
+    # 0.0001% of 100000000 = 100 msat (0.1 sat) - rounded up to a full sat
+    # (1000 msat) rather than left fractional, so the mint is never short
+    assert note_value(client, node.last_preimage.hex()) == 100000000 - 1000
 
 
 def test_pay_callback_rejects_amount_that_cannot_cover_the_fee(client: TestClient, monkeypatch):
