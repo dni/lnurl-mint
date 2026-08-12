@@ -110,6 +110,24 @@ def test_mint_succeeds_at_exactly_min_mint(client: TestClient, node: FakeNode, m
     assert note_value(client, node.last_preimage.hex()) == 10000
 
 
+def test_withdraw_callback_url_ignores_a_spoofed_host_header(client: TestClient, mint_note):
+    # regression: callback/verify URLs must come from settings.base_url,
+    # never req.url_for (Host-header-derived) - a spoofed Host must not be
+    # able to redirect a wallet's mutating callback to an attacker's host
+    k1 = mint_note(5000)
+    data = client.get(f"/w?k1={k1}", headers={"Host": "evil.example"}).json()
+    assert data["callback"] == "http://testserver/w/cb"
+    assert "evil.example" not in data["callback"]
+    assert "evil.example" not in data["defaultDescription"]
+
+
+def test_verify_url_ignores_a_spoofed_host_header(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    data = client.get("/p/cb?amount=5000", headers={"Host": "evil.example"}).json()
+    assert data["verify"].startswith("http://testserver/verify/")
+    assert "evil.example" not in data["verify"]
+
+
 def test_rotate_burns_and_replaces_the_note(client: TestClient, mint_note):
     k1 = mint_note(5000)
     data = client.get(f"/w/cb?k1={k1}").json()
@@ -298,12 +316,12 @@ def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node:
     assert note_value(client, k1) == 5000
 
 
-def test_definite_payment_failure_restores_immediately_without_the_fallback_check(
-    client: TestClient, node: FakeNode, mint_note
-):
-    # a routing failure is the funding source's own definitive answer, not
-    # an ambiguous one - melt should restore the note right away, without
-    # even calling the fallback is_payment_complete check
+def test_payment_failed_still_confirms_before_restoring(client: TestClient, node: FakeNode, mint_note):
+    # PaymentFailed (a clean routing/RPC failure response) is NOT proof no
+    # HTLC remains outstanding - a malicious payee holding a hodl invoice
+    # can make the funding source report exactly this while still holding
+    # an already-sent HTLC open. So even this "definitive" failure must
+    # still be confirmed independently before the note is restored.
     k1 = mint_note(5000)
     node.fail_reason = "Could not find a route to pay this invoice."
     pr = fake_invoice(5000)
@@ -311,7 +329,7 @@ def test_definite_payment_failure_restores_immediately_without_the_fallback_chec
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
 
     assert note_value(client, k1) == 5000
-    assert node.is_payment_complete_called is False
+    assert node.is_payment_complete_called is True
 
 
 def test_pending_note_is_released_if_funding_source_becomes_unavailable(
@@ -395,6 +413,31 @@ def test_undeterminable_payment_status_leaves_the_note_pending(client: TestClien
     # resolves it by hand once they've confirmed the true outcome.
     k1 = mint_note(5000)
     node.fail_payments = True
+    node.is_payment_complete_raises = True
+    pr = fake_invoice(5000)
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
+    assert note_value(client, k1) == 5000
+    assert client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+
+
+def test_hodl_invoice_attack_leaves_the_note_pending_instead_of_restoring(
+    client: TestClient, node: FakeNode, mint_note
+):
+    # regression for the double-spend this whole confirm/pending mechanism
+    # exists to close: attacker melts into their own hodl invoice, holds
+    # the HTLC open rather than settling or failing it. The funding source
+    # gives up and reports a clean PaymentFailed (xpay's retry_for expiring,
+    # or lnd's own send timeout) even though the HTLC is still claimable -
+    # and the confirmation check can't positively rule that out either
+    # (see _is_payment_complete_lnd/_cln raising rather than returning
+    # False for a non-terminal/pending status). Previously PaymentFailed
+    # skipped confirmation and restored immediately, letting the attacker
+    # both settle the held HTLC *and* re-melt the restored note - a double
+    # payout. Now it must stay pending: not restored (the note must not be
+    # spendable again while its value might still be claimed), not
+    # finalized (never confirmed paid either).
+    k1 = mint_note(5000)
+    node.fail_reason = "Could not find a route to pay this invoice."
     node.is_payment_complete_raises = True
     pr = fake_invoice(5000)
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}

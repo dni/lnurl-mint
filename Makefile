@@ -34,11 +34,11 @@ install:
 
 dev:
 	FORWARDED_ALLOW_IPS=* \
-	uv run fastapi dev lnurl_mint/server.py --host 0.0.0.0 --port $(PORT)
+	uv run uvicorn lnurl_mint.server:app --reload --host 0.0.0.0 --port $(PORT)
 
 serve:
 	FORWARDED_ALLOW_IPS=* \
-	uv run fastapi run lnurl_mint/server.py --port $(PORT)
+	uv run uvicorn lnurl_mint.server:app --host 0.0.0.0 --port $(PORT)
 
 build:
 	docker build --pull -t $(IMAGE_NAME) .
@@ -53,6 +53,7 @@ run:
 	touch data/mint.db
 	docker run --restart always -d --name $(CONTAINER_NAME) \
 		--network host \
+		--user $(shell id -u):$(shell id -g) \
 		-e PORT=$(PORT) \
 		$(if $(ENV_FILE),--env-file $(ENV_FILE),) \
 		-v $(PWD)/data/mint.db:/app/mint.db \

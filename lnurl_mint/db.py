@@ -45,7 +45,8 @@ class NoteStore:
                 " id TEXT PRIMARY KEY,"  # sha256(k1), never the secret itself
                 " amount_msat INTEGER NOT NULL,"
                 " spent INTEGER NOT NULL DEFAULT 0,"
-                " pending INTEGER NOT NULL DEFAULT 0)"  # reserved by an in-flight melt, see mark_pending
+                " pending INTEGER NOT NULL DEFAULT 0,"  # reserved by an in-flight melt, see mark_pending
+                " pending_payment_hash TEXT)"  # that melt's invoice hash, for reconcile_pending_melts
             )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS mints ("
@@ -71,6 +72,13 @@ class NoteStore:
             note_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(notes)")}
             if "pending" not in note_columns:
                 self._conn.execute("ALTER TABLE notes ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
+            # likewise, a database from before reconcile_pending_melts has no
+            # way to look a stranded pending note's invoice back up - existing
+            # pending rows (if any) predate this column and are simply
+            # invisible to pending_melts until the next mark_pending call
+            # touches them, same as any other pre-migration NULL
+            if "pending_payment_hash" not in note_columns:
+                self._conn.execute("ALTER TABLE notes ADD COLUMN pending_payment_hash TEXT")
             self._conn.commit()
         return self._conn
 
@@ -162,14 +170,17 @@ class NoteStore:
                 raise ValueError(log_internal_error("Note swap failed", exc)) from exc
         return new_k1s
 
-    def mark_pending(self, note_ids: list[str]) -> None:
+    def mark_pending(self, note_ids: list[str], payment_hash: str) -> None:
         """Reserve `note_ids` for an in-flight melt without burning them yet.
         Per the spec, SERVICE MUST NOT burn a melted k1 until its outgoing
         payment actually settles, but every other callback naming one of
         these ids meanwhile (another melt, a rotate, a split, a merge) MUST
         be rejected with reason "pending" - see swap and this method's
         raises. All-or-nothing, like swap. Follow with finalize_melt once
-        the payment settles, or restore if it doesn't."""
+        the payment settles, or restore if it doesn't - or, if the process
+        stops before either happens, reconcile_pending_melts picks up
+        `payment_hash` (persisted alongside the reservation, since that's
+        what a later confirmation check needs) at the next boot."""
         with self._lock, self.conn:
             for note_id in note_ids:
                 row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
@@ -178,7 +189,9 @@ class NoteStore:
                 if row[0]:
                     raise PendingNoteError("pending")
             for note_id in note_ids:
-                self.conn.execute("UPDATE notes SET pending = 1 WHERE id = ?", (note_id,))
+                self.conn.execute(
+                    "UPDATE notes SET pending = 1, pending_payment_hash = ? WHERE id = ?", (payment_hash, note_id)
+                )
 
     def finalize_melt(self, note_ids: list[str]) -> None:
         """Burn notes for good once their melt's outgoing payment has
@@ -187,7 +200,9 @@ class NoteStore:
         mints nothing, unlike swap."""
         with self._lock, self.conn:
             for note_id in note_ids:
-                self.conn.execute("UPDATE notes SET spent = 1, pending = 0 WHERE id = ?", (note_id,))
+                self.conn.execute(
+                    "UPDATE notes SET spent = 1, pending = 0, pending_payment_hash = NULL WHERE id = ?", (note_id,)
+                )
 
     def restore(self, note_ids: list[str]) -> None:
         """Release notes reserved by mark_pending after their melt's
@@ -196,7 +211,26 @@ class NoteStore:
         leaving them outstanding again."""
         with self._lock, self.conn:
             for note_id in note_ids:
-                self.conn.execute("UPDATE notes SET pending = 0 WHERE id = ?", (note_id,))
+                self.conn.execute("UPDATE notes SET pending = 0, pending_payment_hash = NULL WHERE id = ?", (note_id,))
+
+    def pending_melts(self) -> dict[str, list[str]]:
+        """Every note currently reserved by an in-flight melt (see
+        mark_pending), grouped by the payment_hash their outgoing payment
+        was for - every note_id burned together into one melt shares the
+        same hash, the same grouping mark_pending itself received. A note
+        only shows up here across a restart if its melt's outcome was never
+        resolved before the process stopped (a crash, or _melt_pay's own
+        left-pending fallback for a genuinely unconfirmable outcome - see
+        its docstring); reconcile_pending_melts is what resolves it.
+        Excludes pre-migration pending rows with no recorded hash (see the
+        ALTER TABLE note above) - nothing else can look their invoice up."""
+        grouped: dict[str, list[str]] = {}
+        for note_id, payment_hash in self.conn.execute(
+            "SELECT id, pending_payment_hash FROM notes WHERE pending = 1 AND spent = 0"
+        ):
+            if payment_hash is not None:
+                grouped.setdefault(payment_hash, []).append(note_id)
+        return grouped
 
 
 notes = NoteStore(settings.database_path)

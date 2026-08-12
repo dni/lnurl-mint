@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .frontend import frontend_router
 from .node import fetch_node_info
-from .router import router
+from .router import reconcile_pending_melts, router
 
 
 @asynccontextmanager
@@ -59,6 +59,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             logging.info(
                 f"Connected to {funding_source.backend} funding source: {info.alias or 'no alias'} ({pubkey})."
             )
+            # a note left pending by a melt whose outcome never resolved
+            # before this process last stopped would otherwise reject every
+            # callback with "pending" forever - resolve what we now can
+            # while the funding source is confirmed reachable (see
+            # router.reconcile_pending_melts); only reachable here, not in
+            # the branches above, since it needs a working funding_source
+            await reconcile_pending_melts(funding_source)
 
     yield
 

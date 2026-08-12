@@ -22,7 +22,6 @@ from .models import (
 )
 from .node import (
     LightningBackendConfig,
-    PaymentFailed,
     create_invoice,
     invoice_preimage,
     is_invoice_settled,
@@ -53,12 +52,25 @@ def _funding_source() -> LightningBackendConfig:
 _CONFIRMATION_RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 16)
 
 
-async def _confirm_payment(payment_hash: str, funding_source: LightningBackendConfig) -> bool | None:
+async def _confirm_payment(
+    payment_hash: str, funding_source: LightningBackendConfig, delays: tuple[int, ...] | None = None
+) -> bool | None:
     """Retries is_payment_complete with backoff, returning its definitive
     True/False once it manages to answer, or None if every attempt raised.
     Isolated from _melt_pay's own try/except so a still-failing funding
-    source doesn't get mistaken for one that answered False."""
-    for delay in (0, *_CONFIRMATION_RETRY_DELAYS_SECONDS):
+    source doesn't get mistaken for one that answered False.
+
+    `delays` defaults (via None, resolved here rather than bound as the
+    parameter's own default - a module-level default would be captured
+    once at import time, permanently, deaf to tests monkeypatching the
+    module constant afterward) to the melt-time backoff, appropriate for a
+    live request a wallet is waiting on. reconcile_pending_melts passes
+    `()` instead - a single attempt per pending note - since retrying
+    there would make a boot with several stuck notes take minutes; the
+    next boot is itself the retry for whatever still can't be confirmed."""
+    if delays is None:
+        delays = _CONFIRMATION_RETRY_DELAYS_SECONDS
+    for delay in (0, *delays):
         if delay:
             await asyncio.sleep(delay)
         try:
@@ -95,30 +107,30 @@ async def _melt_pay(
     until an operator restores or finalizes it manually, but never
     disappears on its own.
 
-    A PaymentFailed from pay_invoice is the funding source's own
-    definitive answer that nothing was paid (a clean routing/RPC failure,
-    not a dropped connection) - restored immediately, skipping the
-    fallback confirmation check below entirely, since there's nothing
-    ambiguous left to confirm."""
+    A PaymentFailed from pay_invoice is a clean failure *response*, not
+    proof no HTLC remains outstanding - a malicious payee holding a hodl
+    invoice can make the funding source give up and report exactly this
+    kind of failure while still holding an already-sent HTLC open (see
+    PaymentFailed's own docstring). It's therefore handled the same as any
+    other raise below: still confirmed independently before anything is
+    restored, never treated as reason enough on its own."""
     # notes stay merely "pending" (not yet burned) for the duration of the
     # payment attempt - per the spec, SERVICE MUST NOT burn a melted k1
     # until the outgoing payment actually settles. A failed payment leaves
     # them for the caller to release back to outstanding. But "failed" must
-    # mean *confirmed* failed: pay_invoice can raise after the funding
-    # source already completed the payment (a dropped connection, a
-    # timeout on our side while it was still in flight, ...), and treating
-    # any raise as a definite failure would let the caller retry with a
-    # *different* invoice and get this same value paid out twice. So this
-    # only reports failure once the funding source itself confirms the
-    # payment did NOT go through - and only finalizes once it confirms the
-    # opposite. If it can't confirm either way, the notes are left pending
-    # rather than guessed at in either direction.
+    # mean *confirmed* failed: pay_invoice can raise (or even report a
+    # clean PaymentFailed) after the funding source's own bookkeeping has
+    # moved on while the underlying HTLC is still live - e.g. deliberately,
+    # a hodl invoice held open by the payee - and treating that as a
+    # definite failure would let the caller retry with a *different*
+    # invoice while the original payment can still separately resolve,
+    # paying the same note's value out twice. So this only reports failure
+    # once the funding source itself confirms no HTLC remains outstanding
+    # - and only finalizes once it confirms the opposite. If it can't
+    # confirm either way, the notes are left pending rather than guessed
+    # at in either direction.
     try:
         await pay_invoice(pr, funding_source)
-    except PaymentFailed as exc:
-        logging.info("melt %s: not paid (%s) - restoring", note_ids, exc)
-        notes.restore(note_ids)
-        return
     except Exception as exc:
         if not decoded.has_payment_hash:
             log_internal_error(f"melt {note_ids}: error paying invoice, nothing to confirm against - left pending", exc)
@@ -135,6 +147,30 @@ async def _melt_pay(
         return
 
     notes.finalize_melt(note_ids)
+
+
+async def reconcile_pending_melts(funding_source: LightningBackendConfig) -> None:
+    """Resolves every note _melt_pay left pending across a restart (see
+    NoteStore.pending_melts) - a note only ends up there if its melt's
+    outgoing payment outcome couldn't be established before the process
+    stopped, whether from a crash mid-melt or _melt_pay's own left-pending
+    fallback for a genuinely unconfirmable outcome (see its docstring).
+    Called from server.py's lifespan at boot, once the funding source is
+    known reachable, so an operator doesn't have to resolve these by hand -
+    just keep the funding source up and restart. Same confirm-before-acting
+    discipline as _melt_pay: a note that still can't be confirmed here is
+    logged and left exactly as it was, to be retried at the next boot."""
+    for payment_hash, note_ids in notes.pending_melts().items():
+        completed = await _confirm_payment(payment_hash, funding_source, delays=())
+        if completed is None:
+            logging.warning("reconcile: melt %s still unconfirmed at boot - left pending", note_ids)
+            continue
+        if completed:
+            notes.finalize_melt(note_ids)
+            logging.info("reconcile: melt %s confirmed paid at boot - finalized", note_ids)
+        else:
+            notes.restore(note_ids)
+            logging.info("reconcile: melt %s confirmed not paid at boot - restored", note_ids)
 
 
 def _note_id(k1: str) -> str:
@@ -288,7 +324,11 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
     # produces is credited net of the mint fee.
     payment_hash = sha256(preimage).hexdigest()
     notes.create_mint(payment_hash, pr, net_amount_msat)
-    verify = str(req.url_for("verify_invoice", payment_hash=payment_hash)) if settings.verify_enabled else None
+    # built from settings, not req.url_for (which is Host-header-derived,
+    # spoofable via a plain Host header even behind a proxy - see
+    # config.py's own public_base_url docstring) - same as _pay_response
+    base = settings.public_base_url(str(req.base_url))
+    verify = f"{base}/verify/{payment_hash}" if settings.verify_enabled else None
     return LnurlPayActionResponse(pr=pr, verify=verify)
 
 
@@ -343,13 +383,17 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
     if resolved is None:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown or already spent note.")
     _, amount_msat = resolved
-    callback = str(req.url_for("get_withdraw_callback"))
+    # built from settings, not req.url_for (which is Host-header-derived,
+    # spoofable via a plain Host header even behind a proxy) - same as
+    # _pay_response/get_pay_callback
+    base = settings.public_base_url(str(req.base_url))
+    host = urlparse(base).hostname or req.url.hostname
     return LnurlWithdrawResponse(
-        callback=callback,
+        callback=f"{base}/w/cb",
         k1=k1,
         minWithdrawable=amount_msat,
         maxWithdrawable=amount_msat,
-        defaultDescription=f"lnurlcash bearer note on {req.url.hostname}",
+        defaultDescription=f"lnurlcash bearer note on {host}",
         mintPubkey=await mint_pubkey(settings.funding_source()),
     )
 
@@ -431,7 +475,7 @@ async def get_withdraw_callback(
         funding_source = _funding_source()
 
         try:
-            notes.mark_pending(note_ids)
+            notes.mark_pending(note_ids, decoded.payment_hash)
         except PendingNoteError:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
         except ValueError as exc:

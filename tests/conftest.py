@@ -80,6 +80,7 @@ class FakeNode:
         self.payment_actually_completed = False
         self.is_payment_complete_raises = False
         self.is_payment_complete_called = False
+        self.is_payment_complete_calls = 0  # count, for tests asserting a bounded number of retries
         # seconds to block inside pay_invoice before resolving - simulates
         # an in-flight payment for tests of the melt "pending" lock, which
         # otherwise has no observable window in a single-threaded test
@@ -121,6 +122,7 @@ class FakeNode:
 
     async def is_payment_complete(self, payment_hash: str, config) -> bool:
         self.is_payment_complete_called = True
+        self.is_payment_complete_calls += 1
         if self.is_payment_complete_raises:
             raise ConnectionError("funding source unreachable")
         return self.payment_actually_completed

@@ -33,15 +33,21 @@ async def _raise_for_status(res: httpx.Response) -> None:
 
 
 class PaymentFailed(Exception):
-    """Raised by pay_invoice only when the funding source gave a clean,
-    definitive answer that the payment did NOT go through (a routing
-    failure, a rejected/expired invoice, ...) - as opposed to a dropped
-    connection, our own timeout, or a malformed response, where it's
-    unclear whether the payment actually went out (those stay as plain
-    ValueError/httpx exceptions). router.py's melt path uses this
-    distinction to restore a failed melt's notes immediately, without its
-    fallback is_payment_complete check, and to report `str(exc)` as a
-    clean reason instead of a wrapped exception dump."""
+    """Raised by pay_invoice when the funding source's immediate response
+    to the payment attempt itself was a clean failure (a routing failure,
+    a rejected/expired invoice, ...) - as opposed to a dropped connection,
+    our own timeout, or a malformed response, where it's unclear whether
+    the payment actually went out (those stay as plain ValueError/httpx
+    exceptions). This is NOT the same as "no HTLC can possibly still be
+    outstanding": a malicious payee holding a hodl invoice can make the
+    funding source give up and report exactly this kind of clean failure
+    (lnd's own send attempt timing out, cln's xpay exhausting retry_for)
+    while still holding the HTLC open, to be settled later once the
+    payment's own sender-side bookkeeping has already moved on - so
+    router.py's melt path treats this the same as any other raise: still
+    confirmed independently via is_payment_complete before anything is
+    restored. Used only to carry `str(exc)` as a clean, human-readable
+    reason instead of a wrapped exception dump."""
 
 
 class LightningBackendConfig(BaseModel):
@@ -95,7 +101,17 @@ async def is_payment_complete(payment_hash: str, config: LightningBackendConfig)
     the underlying payment already went through must not be treated as a
     failure: the caller could otherwise retry with a *different* invoice
     and get the same note's value paid out twice (see router.py's melt
-    path, the only caller)."""
+    path, the only caller).
+
+    Returns True/False only once the funding source gives a genuinely
+    terminal answer (succeeded, or definitively failed with no HTLC left
+    outstanding). A payment that's still in flight - notably one held open
+    by a malicious payee's hodl invoice, refusing to either settle or fail
+    it - is neither: the backend implementations raise rather than
+    reporting False for that case, since "still pending" is not "confirmed
+    not paid", and misreporting it as such is exactly what would let a
+    holder recover and re-melt a note whose value is still claimable by
+    someone else."""
     if config.backend == "lnd":
         if not config.url or not config.macaroon:
             raise ValueError("Macaroon is required.")
@@ -243,12 +259,20 @@ def _lnd_failure_reason(reason: str) -> str:
 async def _is_payment_complete_lnd(payment_hash: str, url: str, macaroon: str, config: LightningBackendConfig) -> bool:
     """lnd's REST TrackPaymentV2 - streams updates for a payment by hash,
     including ones already resolved before this call (lnd retains payment
-    records permanently), so the first event is already the terminal one.
-    Unlike r_hash_str elsewhere in this file, this path parameter is
-    base64 (grpc-gateway's convention for a raw `bytes` field), not hex -
-    a hex string of the same length is silently mis-decoded instead of
-    rejected outright. A payment lnd never attempted at all is a 404, not
-    a stream."""
+    records permanently). Unlike r_hash_str elsewhere in this file, this
+    path parameter is base64 (grpc-gateway's convention for a raw `bytes`
+    field), not hex - a hex string of the same length is silently
+    mis-decoded instead of rejected outright. A payment lnd never
+    attempted at all is a 404, not a stream - genuinely safe to report as
+    incomplete, since no HTLC was ever sent for it.
+
+    IN_FLIGHT (or any other non-terminal status) raises rather than
+    returning False: lnd's own timeout_seconds can make a payment attempt
+    give up and move on while an HTLC it already sent remains genuinely
+    locked at the final hop - e.g. a malicious payee holding a hodl
+    invoice open rather than settling or failing it - so anything short of
+    a real terminal SUCCEEDED/FAILED must not be reported as "confirmed
+    not paid"."""
     hash_b64 = quote(b64encode(bytes.fromhex(payment_hash)).decode(), safe="")
     async with httpx.AsyncClient(verify=config.verify, timeout=10.0) as client:
         async with client.stream(
@@ -265,8 +289,13 @@ async def _is_payment_complete_lnd(payment_hash: str, url: str, macaroon: str, c
                     continue
                 event = json.loads(line)
                 payment = event.get("result", event)
-                return payment.get("status") == "SUCCEEDED"
-    return False
+                status = payment.get("status")
+                if status == "SUCCEEDED":
+                    return True
+                if status == "FAILED":
+                    return False
+                raise ValueError(f"lnd reports payment status {status!r} - not a terminal outcome.")
+    raise ValueError("lnd did not report a payment status.")
 
 
 def _lnd_fee_limit_msat(invoice: str) -> int:
@@ -334,14 +363,19 @@ async def _create_invoice_cln(
 
 
 async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningBackendConfig) -> bytes:
-    # xpay (CLN's newer payment engine, superseding the legacy `pay`) only
-    # ever resolves once every part has been individually settled or given
-    # up on - a non-2xx response is therefore always cln's own definitive
-    # answer that nothing was paid, never a "some htlc might still be in
-    # flight" ambiguity. timeout is kept comfortably above xpay's own
-    # default 60s retry_for so our client doesn't time out right as xpay is
-    # about to answer, which would otherwise turn a definitive failure into
-    # an ambiguous one.
+    # xpay (CLN's newer payment engine, superseding the legacy `pay`)
+    # resolves once it stops retrying - but "stops retrying" only means it
+    # gives up trying new routes for parts that haven't landed anywhere
+    # yet, not that every HTLC it already sent is gone: one already
+    # forwarded to a malicious final hop holding a hodl invoice can stay
+    # genuinely locked well past xpay's own retry_for, with xpay reporting
+    # this response as a failure regardless. A non-2xx here is therefore
+    # PaymentFailed's clean-reason case, never treated as proof no HTLC
+    # remains outstanding - see _is_payment_complete_cln, which the caller
+    # always confirms against before restoring a note. timeout is kept
+    # comfortably above xpay's own default 60s retry_for so our client
+    # doesn't time out right as xpay is about to answer, which would
+    # otherwise turn a clean failure response into an ambiguous one.
     async with httpx.AsyncClient(verify=config.verify, timeout=90.0) as client:
         res = await client.post(f"{url}/v1/xpay", headers={"Rune": rune}, json={"invstring": invoice})
         try:
@@ -378,13 +412,23 @@ def _cln_pay_failure_reason(res: httpx.Response) -> str:
 
 async def _is_payment_complete_cln(payment_hash: str, url: str, rune: str, config: LightningBackendConfig) -> bool:
     """Core Lightning's clnrest plugin listpays, filtered by payment_hash -
-    an unattempted or unknown one just comes back as an empty list, not
-    an error."""
+    an unattempted or unknown one just comes back as an empty list, not an
+    error, genuinely safe to report as incomplete since no HTLC was ever
+    sent for it.
+
+    A "pending" entry raises rather than returning False: xpay giving up
+    on retrying (see PaymentFailed) does not guarantee no HTLC is left
+    outstanding - a malicious payee holding a hodl invoice open rather
+    than settling or failing it can keep an already-sent HTLC live well
+    past xpay's own retry_for, so "pending" must not be reported as
+    "confirmed not paid"."""
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.post(f"{url}/v1/listpays", headers={"Rune": rune}, json={"payment_hash": payment_hash})
         await _raise_for_status(res)
         pays = res.json().get("pays") or []
-    return bool(pays) and pays[0].get("status") == "complete"
+    if any(pay.get("status") == "pending" for pay in pays):
+        raise ValueError("cln reports the payment still pending - not a terminal outcome.")
+    return any(pay.get("status") == "complete" for pay in pays)
 
 
 async def _sign_message_cln(message: str, url: str, rune: str, config: LightningBackendConfig) -> tuple[bytes, int]:
