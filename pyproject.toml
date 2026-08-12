@@ -25,14 +25,14 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lnurl_mint"]
 
 [tool.hatch.version]
-path = "lnurl_mint/__init__.py"
+source = "vcs"
 
 [tool.mypy]
 ignore_missing_imports = "True"

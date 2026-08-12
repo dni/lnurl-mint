@@ -21,6 +21,12 @@ WORKDIR /app
 COPY --from=builder /app/.venv ./.venv
 COPY lnurl_mint/ ./lnurl_mint/
 
+# the version this image reports (see lnurl_mint/__init__.py) - passed by
+# the release workflow from the git tag being released; local `make build`
+# / CI's build-check leave it at this placeholder since neither is a release
+ARG VERSION=0.0.0+unknown
+ENV LNURL_MINT_VERSION=${VERSION}
+
 ENV FORWARDED_ALLOW_IPS=*
 ENV PATH="/app/.venv/bin:${PATH}"
 # overridable at `docker run -e PORT=...` - with --network host (see the
