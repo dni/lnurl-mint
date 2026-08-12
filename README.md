@@ -123,7 +123,7 @@ you'd front it with Caddy/nginx for clearnet.
 
 ```sh
 uv sync
-uv run fastapi dev lnurl_mint/server.py
+FORWARDED_ALLOW_IPS=* uv run uvicorn lnurl_mint.server:app --reload
 ```
 
 Configure the funding source via `.env` (see `.env.example`), lnd or cln REST.
@@ -150,11 +150,18 @@ parameters).
 mkdir -p data && touch data/mint.db
 docker run --restart always -d --name lnurl-mint \
   --network host \
+  --user "$(id -u):$(id -g)" \
   -e PORT=8111 \
+  -e DATABASE_PATH=/app/data/mint.db \
   --env-file .env \
-  -v "$(pwd)/data/mint.db:/app/mint.db" \
+  -v "$(pwd)/data:/app/data" \
   dni256/lnurl-mint          # or: make run
 ```
+
+The image runs as a non-root user; `--user` matches it to whichever host
+user owns `data/` so it can write `mint.db` and its sqlite journal/WAL
+files (which must live in the *same directory*, not just the db file
+itself - a plain `-v .../mint.db:/app/mint.db` file mount isn't enough).
 
 `--network host` lets `FUNDINGSOURCE_URL=https://localhost:3010` in `.env`
 reach a node running on the host directly, no `host.docker.internal`

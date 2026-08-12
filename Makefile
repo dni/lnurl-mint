@@ -51,11 +51,19 @@ run:
 	docker rm $(CONTAINER_NAME) 2>/dev/null || true
 	mkdir -p data
 	touch data/mint.db
+	# the whole data/ dir is bind-mounted, not just mint.db - sqlite needs
+	# to create its rollback-journal/WAL companion files in the *same
+	# directory* as the db file, and --user (below) only guarantees this
+	# host dir is writable by that UID, not /app itself (owned by the
+	# image's own baked-in non-root user, whichever UID that happens to
+	# be - see Dockerfile). DATABASE_PATH tells the app to look for its db
+	# there instead of the image's default ./mint.db.
 	docker run --restart always -d --name $(CONTAINER_NAME) \
 		--network host \
 		--user $(shell id -u):$(shell id -g) \
 		-e PORT=$(PORT) \
+		-e DATABASE_PATH=/app/data/mint.db \
 		$(if $(ENV_FILE),--env-file $(ENV_FILE),) \
-		-v $(PWD)/data/mint.db:/app/mint.db \
+		-v $(PWD)/data:/app/data \
 		$(IMAGE_NAME)
 	@echo "Container $(CONTAINER_NAME) is running at http://localhost:$(PORT)"
