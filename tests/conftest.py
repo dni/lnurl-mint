@@ -145,6 +145,9 @@ def node(monkeypatch: pytest.MonkeyPatch) -> FakeNode:
     monkeypatch.setattr(router_module, "invoice_preimage", fake.invoice_preimage)
     monkeypatch.setattr(router_module, "pay_invoice", fake.pay_invoice)
     monkeypatch.setattr(router_module, "is_payment_complete", fake.is_payment_complete)
+    # no real backoff in tests - individual tests only care whether
+    # _confirm_payment eventually succeeds or gives up, never how long
+    monkeypatch.setattr(router_module, "_CONFIRMATION_RETRY_DELAYS_SECONDS", ())
     monkeypatch.setattr(frontend_module, "fetch_node_info", fake.fetch_node_info)
     monkeypatch.setattr(signing_module, "fetch_node_info", fake.fetch_node_info)
     monkeypatch.setattr(signing_module, "sign_message", fake.sign_message)

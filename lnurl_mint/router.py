@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -45,6 +46,28 @@ def _funding_source() -> LightningBackendConfig:
     return funding_source
 
 
+# backoff between is_payment_complete retries, when pay_invoice's own
+# outcome was ambiguous - gives a momentary funding-source hiccup (the one
+# case a retry can actually fix) a chance to clear before _melt_pay gives
+# up and leaves the notes pending for manual reconciliation. ~31s total.
+_CONFIRMATION_RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 16)
+
+
+async def _confirm_payment(payment_hash: str, funding_source: LightningBackendConfig) -> bool | None:
+    """Retries is_payment_complete with backoff, returning its definitive
+    True/False once it manages to answer, or None if every attempt raised.
+    Isolated from _melt_pay's own try/except so a still-failing funding
+    source doesn't get mistaken for one that answered False."""
+    for delay in (0, *_CONFIRMATION_RETRY_DELAYS_SECONDS):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await is_payment_complete(payment_hash, funding_source)
+        except Exception as exc:
+            logging.warning("confirm payment %s: attempt failed, retrying: %s", payment_hash, exc)
+    return None
+
+
 async def _melt_pay(
     note_ids: list[str], pr: str, decoded: bolt11.types.Bolt11, funding_source: LightningBackendConfig
 ) -> None:
@@ -55,22 +78,28 @@ async def _melt_pay(
     payment asynchronously, so this runs as a FastAPI BackgroundTask and
     has no way left to report back to the wallet: every path below must
     itself decide finalize (NoteStore.finalize_melt, burns the notes for
-    good) vs. restore (NoteStore.restore, leaves them outstanding again),
-    never raise. A failure only a wallet-visible retry could otherwise fix
-    (e.g. paying a completely different invoice) has no such mechanism
-    here - the wallet learns of a failed melt only by its own invoice never
-    getting paid, per spec.
+    good), restore (NoteStore.restore, leaves them outstanding again), or -
+    when neither can be justified - leave them pending for an operator to
+    resolve by hand once they've confirmed the true outcome directly
+    against the funding source. Never raise. A failure only a
+    wallet-visible retry could otherwise fix (e.g. paying a completely
+    different invoice) has no such mechanism here - the wallet learns of a
+    failed melt only by its own invoice never getting paid, per spec.
 
-    Finalizes once the payment is confirmed settled - or, when its outcome
-    can't be confirmed either way, assumed settled to avoid the risk of
-    paying it out twice on a retry (see the ambiguous-failure handling
-    below).
+    Finalizes only once the payment is positively confirmed settled, and
+    restores only once it's positively confirmed not to have gone through.
+    A bearer note MUST NOT be destroyed on a guess: if the outcome can't be
+    established either way even after _confirm_payment's retries, the
+    notes are left pending (see log_internal_error's reference id) rather
+    than assumed one way or the other - the note stays frozen and unusable
+    until an operator restores or finalizes it manually, but never
+    disappears on its own.
 
     A PaymentFailed from pay_invoice is the funding source's own
     definitive answer that nothing was paid (a clean routing/RPC failure,
     not a dropped connection) - restored immediately, skipping the
-    fallback is_payment_complete check below entirely, since there's
-    nothing ambiguous left to confirm."""
+    fallback confirmation check below entirely, since there's nothing
+    ambiguous left to confirm."""
     # notes stay merely "pending" (not yet burned) for the duration of the
     # payment attempt - per the spec, SERVICE MUST NOT burn a melted k1
     # until the outgoing payment actually settles. A failed payment leaves
@@ -81,8 +110,9 @@ async def _melt_pay(
     # any raise as a definite failure would let the caller retry with a
     # *different* invoice and get this same value paid out twice. So this
     # only reports failure once the funding source itself confirms the
-    # payment did NOT go through - if even that check fails, the notes are
-    # finalized as burned rather than risk a double payout.
+    # payment did NOT go through - and only finalizes once it confirms the
+    # opposite. If it can't confirm either way, the notes are left pending
+    # rather than guessed at in either direction.
     try:
         await pay_invoice(pr, funding_source)
     except PaymentFailed as exc:
@@ -91,14 +121,11 @@ async def _melt_pay(
         return
     except Exception as exc:
         if not decoded.has_payment_hash:
-            logging.error("melt %s: error paying invoice, nothing to confirm against - burning: %s", note_ids, exc)
-            notes.finalize_melt(note_ids)
+            log_internal_error(f"melt {note_ids}: error paying invoice, nothing to confirm against - left pending", exc)
             return
-        try:
-            completed = await is_payment_complete(decoded.payment_hash, funding_source)
-        except Exception:
-            logging.error("melt %s: could not confirm payment status - burning: %s", note_ids, exc)
-            notes.finalize_melt(note_ids)
+        completed = await _confirm_payment(decoded.payment_hash, funding_source)
+        if completed is None:
+            log_internal_error(f"melt {note_ids}: could not confirm payment status after retries - left pending", exc)
             return
         if not completed:
             logging.info("melt %s: confirmed not paid (%s) - restoring", note_ids, exc)

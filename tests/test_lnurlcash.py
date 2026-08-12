@@ -6,6 +6,7 @@ from os import urandom
 
 from fastapi.testclient import TestClient
 
+import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
 from tests.conftest import FakeNode, fake_invoice
 
@@ -384,17 +385,48 @@ def test_ambiguously_failed_payment_that_actually_succeeded_does_not_restore(
     assert note_value(client, k1) is None
 
 
-def test_undeterminable_payment_status_does_not_restore(client: TestClient, node: FakeNode, mint_note):
+def test_undeterminable_payment_status_leaves_the_note_pending(client: TestClient, node: FakeNode, mint_note):
     # if pay_invoice fails AND the confirmation check itself can't tell
-    # whether the payment went through, err toward *not* restoring - an
-    # honest caller might lose this note's value in this rare case, but
-    # that's preferable to risking a double payout if it actually succeeded
+    # whether the payment went through (even after _confirm_payment's
+    # retries), the mint must not guess: burning would risk destroying a
+    # bearer that was in fact never paid for, restoring would risk a
+    # double payout if it secretly was. It's left pending instead - still
+    # outstanding (so its value isn't lost), but unusable until an operator
+    # resolves it by hand once they've confirmed the true outcome.
     k1 = mint_note(5000)
     node.fail_payments = True
     node.is_payment_complete_raises = True
     pr = fake_invoice(5000)
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
-    assert note_value(client, k1) is None
+    assert note_value(client, k1) == 5000
+    assert client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+
+
+def test_undeterminable_payment_status_retries_before_giving_up(
+    client: TestClient, node: FakeNode, mint_note, monkeypatch
+):
+    # a transient funding-source hiccup (is_payment_complete raising once)
+    # must not be enough to strand the note - _confirm_payment retries and,
+    # once the funding source recovers, the melt resolves normally instead
+    # of falling back to "pending"
+    monkeypatch.setattr(router_module, "_CONFIRMATION_RETRY_DELAYS_SECONDS", (0, 0))
+    k1 = mint_note(5000)
+    node.fail_payments = True
+    node.payment_actually_completed = True
+
+    attempts = {"n": 0}
+    real_is_payment_complete = node.is_payment_complete
+
+    async def flaky_is_payment_complete(payment_hash: str, config):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise ConnectionError("funding source unreachable")
+        return await real_is_payment_complete(payment_hash, config)
+
+    monkeypatch.setattr(router_module, "is_payment_complete", flaky_is_payment_complete)
+    pr = fake_invoice(5000)
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
+    assert note_value(client, k1) is None  # confirmed paid on retry - finalized as burned, not left pending
 
 
 def test_any_invalid_k1_fails_the_whole_request(client: TestClient, mint_note):
