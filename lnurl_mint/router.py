@@ -347,9 +347,13 @@ async def get_withdraw_callback(
     - one k1, no pr, no amount: rotate - burned and replaced by a fresh
       note of the same value.
     - many k1 + amount, no pr: split - all burned; `k1` in the response
-      carries `amount`, `change` the remainder.
+      carries `amount`, `change` the remainder, minus base_fee_msat if
+      this mint charges fees (LUD-25) - fails with reason "insufficient
+      value" if that would leave change worth less than the fee.
     - many k1, no pr, no amount: merge - all burned, one note worth their
-      sum minted.
+      sum minted, plus (n - 1) * base_fee_msat if this mint charges fees -
+      refunding every base fee already collected beyond the single one an
+      n-note merge should have cost.
 
     If any k1 is invalid, the whole request fails and nothing is burned or
     minted (see NoteStore.swap's single transaction). While a k1 is
@@ -421,18 +425,34 @@ async def get_withdraw_callback(
         if amount is not None:
             if not 0 < amount < total_msat:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
-            new_k1, change_k1 = notes.swap(note_ids, [amount, total_msat - amount])
+            # per LUD-25, base_fee_msat (never fee_percent_ppm - that's
+            # already been withheld once, at mint time) comes out of
+            # change, not the requested amount, so a holder can't dodge it
+            # by splitting into many dust notes and melting each
+            # separately. 0 when this SERVICE is fee-free, a no-op then.
+            change_before_fee = total_msat - amount
+            if change_before_fee < settings.base_fee_msat:
+                raise HTTPException(HTTPStatus.BAD_REQUEST, "insufficient value")
+            change_amount = change_before_fee - settings.base_fee_msat
+            new_k1, change_k1 = notes.swap(note_ids, [amount, change_amount])
             funding_source = settings.funding_source()
             return WithdrawSuccessResponse(
                 k1=new_k1,
                 change=change_k1,
                 signature=await sign_note(new_k1, amount, funding_source),
-                changeSignature=await sign_note(change_k1, total_msat - amount, funding_source),
+                changeSignature=await sign_note(change_k1, change_amount, funding_source),
             )
 
-        (new_k1,) = notes.swap(note_ids, [total_msat])
+        # rotate is a merge of one note - the refund below is exactly 0
+        # then, so it's covered by this same branch without a special case.
+        # For an actual merge (n > 1), refunding (n - 1) * base_fee_msat
+        # gives back every base fee already collected beyond the single one
+        # this now-one note should have cost, per LUD-25.
+        refund = (len(note_ids) - 1) * settings.base_fee_msat
+        merged_amount = total_msat + refund
+        (new_k1,) = notes.swap(note_ids, [merged_amount])
         return WithdrawSuccessResponse(
-            k1=new_k1, signature=await sign_note(new_k1, total_msat, settings.funding_source())
+            k1=new_k1, signature=await sign_note(new_k1, merged_amount, settings.funding_source())
         )
     except PendingNoteError:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")

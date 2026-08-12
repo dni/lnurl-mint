@@ -157,6 +157,60 @@ def test_merge_burns_all_and_mints_the_sum(client: TestClient, mint_note):
     assert note_value(client, data["k1"]) == 5000
 
 
+def test_split_deducts_base_fee_from_change_when_mint_charges_fees(client: TestClient, mint_note, monkeypatch):
+    # LUD-25: base_fee_msat comes out of change, never the requested
+    # amount - minted fee-free first so the note's own value stays a clean
+    # 5000, then the fee is turned on only for the split itself
+    k1 = mint_note(5000)
+    monkeypatch.setattr(settings, "base_fee_msat", 1000)
+    data = client.get(f"/w/cb?k1={k1}&amount=2000").json()
+    assert data["status"] == "OK"
+    assert note_value(client, data["k1"]) == 2000
+    assert note_value(client, data["change"]) == 3000 - 1000
+
+
+def test_split_does_not_reapply_fee_percent_ppm(client: TestClient, mint_note, monkeypatch):
+    # per LUD-25, fee_percent_ppm was already withheld once at mint time -
+    # only the flat base_fee_msat is charged again on split
+    k1 = mint_note(5000)
+    monkeypatch.setattr(settings, "base_fee_msat", 0)
+    monkeypatch.setattr(settings, "fee_percent_ppm", 500_000)  # 50%, if it were (wrongly) reapplied
+    data = client.get(f"/w/cb?k1={k1}&amount=2000").json()
+    assert data["status"] == "OK"
+    assert note_value(client, data["change"]) == 3000
+
+
+def test_split_rejects_when_change_cannot_cover_the_base_fee(client: TestClient, mint_note, monkeypatch):
+    k1 = mint_note(5000)
+    monkeypatch.setattr(settings, "base_fee_msat", 2000)
+    # amount=4500 leaves change worth 500 before the fee - can't cover it
+    result = client.get(f"/w/cb?k1={k1}&amount=4500").json()
+    assert result == {"status": "ERROR", "reason": "insufficient value"}
+    # rejected outright - the note is untouched, not partially burned
+    assert note_value(client, k1) == 5000
+
+
+def test_merge_refunds_base_fee_for_every_extra_note(client: TestClient, mint_note, monkeypatch):
+    # LUD-25: merging n notes refunds (n - 1) * base_fee_msat, giving back
+    # every base fee already collected beyond the single one this now-one
+    # note should have cost
+    a, b, c = mint_note(2000), mint_note(3000), mint_note(1000)
+    monkeypatch.setattr(settings, "base_fee_msat", 500)
+    data = client.get(f"/w/cb?k1={a}&k1={b}&k1={c}").json()
+    assert data["status"] == "OK"
+    assert note_value(client, data["k1"]) == 2000 + 3000 + 1000 + 2 * 500
+
+
+def test_rotate_is_unaffected_by_mint_fees(client: TestClient, mint_note, monkeypatch):
+    # rotate is a merge of one - (1 - 1) * base_fee_msat refunds nothing,
+    # so a fee-charging mint still returns exactly the note's own value
+    k1 = mint_note(5000)
+    monkeypatch.setattr(settings, "base_fee_msat", 1000)
+    data = client.get(f"/w/cb?k1={k1}").json()
+    assert data["status"] == "OK"
+    assert note_value(client, data["k1"]) == 5000
+
+
 def test_melt_pays_invoice_of_exactly_the_notes_value(client: TestClient, node: FakeNode, mint_note):
     k1 = mint_note(5000)
     pr = fake_invoice(5000)
