@@ -42,18 +42,19 @@ async def mint_pubkey(config: LightningBackendConfig) -> str | None:
 async def sign_note(k1: str, amount_msat: int, config: LightningBackendConfig) -> str | None:
     """A recoverable signature over (k1, amount_msat) per LUD-XX's Offline
     verification, signed by the funding source node's own signmessage RPC,
-    as 65 bytes (recovery id, then r, then s - note this orders the
-    recovery id *first*, unlike raw BOLT11 signatures, which place it
-    last), hex-encoded. None if signing isn't possible right now (no
-    funding source, or it's unreachable) - never raises, since a
-    rotate/split/merge must still succeed without it."""
+    as 65 bytes (r, then s, then recovery id), hex-encoded. The
+    signmessage RPC itself returns recovery-id-leading bytes; per LUD-XX
+    those are reordered here into r ‖ s ‖ recovery-id before being handed
+    out, matching raw BOLT11 signatures. None if signing isn't possible
+    right now (no funding source, or it's unreachable) - never raises,
+    since a rotate/split/merge must still succeed without it."""
     if not config.backend:
         return None
     try:
         r_s, recovery_id = await sign_message(_message(k1, amount_msat), config)
     except Exception:
         return None
-    return (bytes([recovery_id]) + r_s).hex()
+    return (r_s + bytes([recovery_id])).hex()
 
 
 def verify_note(pubkey_hex: str, k1: str, amount_msat: int, signature_hex: str) -> bool:
@@ -63,8 +64,7 @@ def verify_note(pubkey_hex: str, k1: str, amount_msat: int, signature_hex: str) 
     mint never calls it itself; it exists for the test suite to confirm
     sign_note produces what the spec's algorithm expects."""
     signature = bytes.fromhex(signature_hex)
-    recovery_id, r, s = signature[0], signature[1:33], signature[33:65]
     message = _message(k1, amount_msat).encode()
     digest = sha256(sha256(_LIGHTNING_SIGNED_MESSAGE_PREFIX + message).digest()).digest()
-    recovered = PublicKey.from_signature_and_message(r + s + bytes([recovery_id]), digest, hasher=None)
+    recovered = PublicKey.from_signature_and_message(signature, digest, hasher=None)
     return recovered.format(compressed=True).hex() == pubkey_hex
