@@ -8,9 +8,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
+from .errors import log_internal_error
 from .frontend import frontend_router
 from .node import LightningBackendConfig, fetch_node_info
 from .router import reconcile_pending_melts, router
+
+
+async def _reconcile_pending_melts_safely(funding_source: LightningBackendConfig) -> None:
+    """reconcile_pending_melts, guarded against its own unexpected
+    exceptions - called both at boot and from every healthy tick of
+    _monitor_funding_source below, and an uncaught one from either call
+    site must not crash the thing calling it (app startup entirely, or
+    the background monitor loop for the rest of the process's life)."""
+    try:
+        await reconcile_pending_melts(funding_source)
+    except Exception as exc:
+        log_internal_error("reconcile_pending_melts failed", exc)
 
 
 async def _monitor_funding_source(funding_source: LightningBackendConfig, healthy: bool) -> None:
@@ -23,11 +36,21 @@ async def _monitor_funding_source(funding_source: LightningBackendConfig, health
     the boot check's own already-known state, so the first tick here
     doesn't have to guess whether a transition actually happened.
 
-    Only logs on an actual transition (became unreachable / recovered),
-    never every tick - otherwise this would just add its own noise every
-    interval instead of a signal worth alerting on. Cancelled from
-    lifespan at shutdown; CancelledError during the sleep is expected and
-    left to propagate so that cancellation actually stops the loop."""
+    Health-state logging only fires on an actual transition (became
+    unreachable / recovered), never every tick - otherwise this would just
+    add its own noise every interval instead of a signal worth alerting
+    on. reconcile_pending_melts, by contrast, runs on *every* healthy
+    tick, not just a recovery - a note can be left stuck pending by a
+    crash mid-melt (or _melt_pay's own left-pending fallback) at any time,
+    not only right as the funding source happens to flip from unreachable
+    to reachable, and reconcile_pending_melts is already cheap/a no-op
+    when nothing is actually pending (see NoteStore.pending_melts). This
+    is what used to require an operator to notice and restart the process
+    by hand to pick such a note back up.
+
+    Cancelled from lifespan at shutdown; CancelledError during the sleep
+    is expected and left to propagate so that cancellation actually stops
+    the loop."""
     while True:
         await asyncio.sleep(settings.funding_source_health_check_interval_seconds)
         try:
@@ -39,10 +62,11 @@ async def _monitor_funding_source(funding_source: LightningBackendConfig, health
                     "Minting, melting, and offline verification are unavailable until it recovers."
                 )
             healthy = False
-        else:
-            if not healthy:
-                logging.info(f"{funding_source.backend} funding source is reachable again.")
-            healthy = True
+            continue
+        if not healthy:
+            logging.info(f"{funding_source.backend} funding source is reachable again.")
+        healthy = True
+        await _reconcile_pending_melts_safely(funding_source)
 
 
 @asynccontextmanager
@@ -102,7 +126,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             # while the funding source is confirmed reachable (see
             # router.reconcile_pending_melts); only reachable here, not in
             # the branches above, since it needs a working funding_source
-            await reconcile_pending_melts(funding_source)
+            await _reconcile_pending_melts_safely(funding_source)
         # spawned regardless of whether the boot check above succeeded -
         # even if unreachable right now, this is what notices it recovering
         # later, or breaking again after a boot-time success (see issue #2)
