@@ -1,7 +1,9 @@
 import asyncio
+import logging
 
 from fastapi.testclient import TestClient
 
+import lnurl_mint.errors as errors_module
 import lnurl_mint.router as router_module
 import lnurl_mint.server as server_module
 from lnurl_mint.config import settings
@@ -58,6 +60,30 @@ def test_reconcile_leaves_still_unconfirmable_notes_pending_without_retrying(
 
     assert node.is_payment_complete_calls == 1
     assert client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+
+
+def test_reconcile_writes_still_unconfirmed_notes_to_error_log(
+    client: TestClient, node: FakeNode, mint_note, monkeypatch, tmp_path
+):
+    # regression: this used to be a plain logging.warning (stdout only). A
+    # note interrupted mid-melt by a restart never gets a chance to reach
+    # _melt_pay's own log_internal_error call - every later boot's
+    # reconcile attempt hits this same still-unconfirmed outcome, so
+    # without this, such a note leaves no durable record anywhere, ever,
+    # only ephemeral warnings that scroll out of `docker logs`.
+    log_path = tmp_path / "error.log"
+    test_logger = logging.getLogger("lnurl_mint.errors.test_reconcile")
+    test_logger.setLevel(logging.ERROR)
+    test_logger.propagate = False
+    test_logger.addHandler(logging.FileHandler(str(log_path), delay=True))
+    monkeypatch.setattr(errors_module, "_logger", test_logger)
+
+    k1 = _leave_a_note_pending(client, node, mint_note)
+    asyncio.run(router_module.reconcile_pending_melts(settings.funding_source()))
+
+    logged = log_path.read_text()
+    assert "still unconfirmed at boot" in logged
+    assert k1 not in logged  # the note's own secret must never land in a log file
 
 
 def test_app_boot_reconciles_a_note_left_pending_by_a_previous_process(

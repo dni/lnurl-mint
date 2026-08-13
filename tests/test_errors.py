@@ -21,6 +21,27 @@ def test_log_internal_error_does_not_crash_when_error_log_is_unwritable(monkeypa
     assert "reference:" in reference
 
 
+def test_log_internal_error_falls_back_to_stdout_when_error_log_is_unwritable(monkeypatch, tmp_path, caplog):
+    # regression: _logger has propagate=False specifically so a successful
+    # error.log write never *also* shows up in stdout/docker logs - but
+    # that meant a failed write vanished with no trace anywhere, not even a
+    # hint that error.log itself needed attention. It must fall back to the
+    # root logger (docker logs) instead of disappearing silently.
+    unwritable_dir = tmp_path / "unwritable"
+    unwritable_dir.mkdir(mode=0o500)
+    broken_logger = logging.getLogger("lnurl_mint.errors.test_fallback")
+    broken_logger.setLevel(logging.ERROR)
+    broken_logger.propagate = False
+    broken_logger.addHandler(logging.FileHandler(str(unwritable_dir / "error.log"), delay=True))
+    monkeypatch.setattr(errors_module, "_logger", broken_logger)
+
+    with caplog.at_level(logging.ERROR):
+        reference = errors_module.log_internal_error("boom", ValueError("something broke"))
+
+    ref_id = reference.split("reference: ")[1].rstrip(").")
+    assert any(ref_id in r.message and "error.log unwritable" in r.message for r in caplog.records)
+
+
 def test_log_internal_error_still_logs_normally_when_writable(tmp_path, monkeypatch):
     logger = logging.getLogger("lnurl_mint.errors.test_writable")
     logger.setLevel(logging.ERROR)

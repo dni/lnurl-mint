@@ -36,9 +36,15 @@ def log_internal_error(context: str, exc: BaseException) -> str:
     reference = secrets.token_hex(4)
     try:
         _logger.error("[%s] %s: %s", reference, context, exc, exc_info=exc)
-    except OSError:
-        # error.log itself is unwritable (see delay=True above) - the
-        # caller's own error must still surface with its reference id, not
-        # be replaced by an unhandled crash in this diagnostic-only path
-        pass
+    except OSError as log_exc:
+        # error.log itself is unwritable (see delay=True above) - falls
+        # back to stdout (docker logs) rather than vanish entirely: _logger
+        # has propagate=False specifically so this never doubles up with
+        # error.log in the normal case, but that means an unwritable
+        # error.log would otherwise leave no trace of this error anywhere,
+        # not even a hint that error.log itself needs attention. Both
+        # channels are operator-only either way (never caller-facing, see
+        # this function's own docstring), so this fallback crosses no
+        # trust boundary the primary path didn't already cross.
+        logging.error("[%s] %s: %s (error.log unwritable: %s)", reference, context, exc, log_exc, exc_info=exc)
     return f"{context} (reference: {reference})."

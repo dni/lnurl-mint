@@ -163,7 +163,18 @@ async def reconcile_pending_melts(funding_source: LightningBackendConfig) -> Non
     for payment_hash, note_ids in notes.pending_melts().items():
         completed = await _confirm_payment(payment_hash, funding_source, delays=())
         if completed is None:
-            logging.warning("reconcile: melt %s still unconfirmed at boot - left pending", note_ids)
+            # same log_internal_error as _melt_pay's own left-pending case
+            # (not just logging.warning) - otherwise a note that outlives
+            # its original melt (interrupted by a restart before that
+            # melt's own 31s of retries finished) never reaches error.log
+            # at all: every later boot's reconcile attempt would hit this
+            # same still-unconfirmed outcome and only ever warn to stdout,
+            # forever, with no durable record anywhere an operator would
+            # find it
+            log_internal_error(
+                f"reconcile: melt {note_ids} still unconfirmed at boot - left pending",
+                RuntimeError(f"is_payment_complete could not confirm payment_hash={payment_hash}"),
+            )
             continue
         if completed:
             notes.finalize_melt(note_ids)
