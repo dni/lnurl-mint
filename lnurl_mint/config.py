@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # both lnd's and cln's REST APIs are commonly self-signed. Leave unset if
     # it's fronted by a reverse proxy with a real certificate.
     fundingsource_cert_path: str | None = None
+    # how often (seconds) to re-probe the funding source in the background
+    # after boot, once a backend is configured - the one-shot check at
+    # startup (see server.py's lifespan) only catches a connection problem
+    # that already existed at boot; this catches one that develops later,
+    # or a flaky one boot happened to catch mid-recovery. Only ever logs on
+    # a state transition (became unreachable / recovered), never every tick.
+    funding_source_health_check_interval_seconds: int = 60
 
     # bounds on the value of a single minted note (LUD-06 min/maxSendable)
     min_sendable_msat: int = 10_000

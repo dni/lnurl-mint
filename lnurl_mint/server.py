@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -7,8 +9,40 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .frontend import frontend_router
-from .node import fetch_node_info
+from .node import LightningBackendConfig, fetch_node_info
 from .router import reconcile_pending_melts, router
+
+
+async def _monitor_funding_source(funding_source: LightningBackendConfig, healthy: bool) -> None:
+    """Keeps re-probing the funding source in the background for as long
+    as the process runs, every funding_source_health_check_interval_seconds
+    - the one-shot check in lifespan below only catches a connection
+    problem that already existed at boot (see issue #2: a mint whose
+    funding source went bad *after* startup kept silently accepting melts
+    it couldn't fulfill, with nothing in the logs to say why). `healthy` is
+    the boot check's own already-known state, so the first tick here
+    doesn't have to guess whether a transition actually happened.
+
+    Only logs on an actual transition (became unreachable / recovered),
+    never every tick - otherwise this would just add its own noise every
+    interval instead of a signal worth alerting on. Cancelled from
+    lifespan at shutdown; CancelledError during the sleep is expected and
+    left to propagate so that cancellation actually stops the loop."""
+    while True:
+        await asyncio.sleep(settings.funding_source_health_check_interval_seconds)
+        try:
+            await fetch_node_info(funding_source)
+        except Exception as exc:
+            if healthy:
+                logging.warning(
+                    f"{funding_source.backend} funding source became unreachable: {exc!s}. "
+                    "Minting, melting, and offline verification are unavailable until it recovers."
+                )
+            healthy = False
+        else:
+            if not healthy:
+                logging.info(f"{funding_source.backend} funding source is reachable again.")
+            healthy = True
 
 
 @asynccontextmanager
@@ -41,12 +75,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # behavior, and every route still probes the funding source fresh on
     # its own.
     funding_source = settings.funding_source()
+    monitor_task: asyncio.Task | None = None
     if not funding_source.backend:
         logging.warning(
             "No funding source configured (FUNDINGSOURCE_BACKEND unset) - "
             "minting, melting, and offline verification are all unavailable."
         )
     else:
+        healthy = False
         try:
             info = await fetch_node_info(funding_source)
         except Exception as exc:
@@ -55,6 +91,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                 "Minting, melting, and offline verification will be unavailable until it responds."
             )
         else:
+            healthy = True
             pubkey = info.uri.split("@")[0] if info.uri else "unknown pubkey"
             logging.info(
                 f"Connected to {funding_source.backend} funding source: {info.alias or 'no alias'} ({pubkey})."
@@ -66,8 +103,17 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             # router.reconcile_pending_melts); only reachable here, not in
             # the branches above, since it needs a working funding_source
             await reconcile_pending_melts(funding_source)
+        # spawned regardless of whether the boot check above succeeded -
+        # even if unreachable right now, this is what notices it recovering
+        # later, or breaking again after a boot-time success (see issue #2)
+        monitor_task = asyncio.create_task(_monitor_funding_source(funding_source, healthy))
 
     yield
+
+    if monitor_task is not None:
+        monitor_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await monitor_task
 
 
 app = FastAPI(
