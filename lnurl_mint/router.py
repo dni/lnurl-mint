@@ -480,8 +480,12 @@ async def get_withdraw_callback(
       note of the same value.
     - many k1 + amount, no pr: split - all burned; `k1` in the response
       carries `amount`, `change` the remainder, minus base_fee_msat if
-      this mint charges fees (LUD-25) - fails with reason "insufficient
-      value" if that would leave change worth less than the fee.
+      this mint charges fees (LUD-25). Both sides must clear min_mint_msat
+      - the same dust floor /p/cb enforces at mint time, since neither
+      side of a split may mint a note the mint wouldn't have minted
+      fresh: `amount` fails outright if too low, `change` fails with
+      reason "insufficient value" (the same reason it already used when
+      the fee alone couldn't be covered).
     - many k1, no pr, no amount: merge - all burned, one note worth their
       sum minted, plus (n - 1) * base_fee_msat if this mint charges fees -
       refunding every base fee already collected beyond the single one an
@@ -557,6 +561,17 @@ async def get_withdraw_callback(
         if amount is not None:
             if not 0 < amount < total_msat:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
+            # both sides of a split are freshly minted notes, so the same
+            # dust floor /p/cb enforces at mint time applies here too - a
+            # split must never be able to produce a note worth less than
+            # that just because it came from an existing note's value
+            # instead of a fresh invoice. `amount` is wallet-chosen, so
+            # this is checked separately from `change` below to give a
+            # message that points at which side was actually the problem.
+            if amount < settings.min_mint_msat:
+                raise HTTPException(
+                    HTTPStatus.BAD_REQUEST, f"amount too low to mint a note (min {settings.min_mint_msat} msat)."
+                )
             # per LUD-25, base_fee_msat (never fee_percent_ppm - that's
             # already been withheld once, at mint time) comes out of
             # change, not the requested amount, so a holder can't dodge it
@@ -566,6 +581,17 @@ async def get_withdraw_callback(
             if change_before_fee < settings.base_fee_msat:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, "insufficient value")
             change_amount = change_before_fee - settings.base_fee_msat
+            # strictly *less than* base_fee_msat above only guards against
+            # a negative change_amount - change_before_fee == base_fee_msat
+            # passes that check but leaves change_amount at exactly 0, a
+            # bearer note for nothing. max(1, ...) below closes that
+            # regardless of min_mint_msat's own configured value: a 0-msat
+            # note must never be mintable even on a mint that otherwise
+            # allows dust (min_mint_msat=0) - unlike the dust floor itself,
+            # this isn't a configurable preference, "nothing" is never a
+            # valid note value.
+            if change_amount < max(1, settings.min_mint_msat):
+                raise HTTPException(HTTPStatus.BAD_REQUEST, "insufficient value")
             new_k1, change_k1 = notes.swap(note_ids, [amount, change_amount])
             funding_source = settings.funding_source()
             return WithdrawSuccessResponse(
