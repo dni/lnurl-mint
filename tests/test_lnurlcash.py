@@ -239,6 +239,33 @@ def test_melt_pays_invoice_of_exactly_the_notes_value(client: TestClient, node: 
     assert note_value(client, k1) is None
 
 
+def test_melt_fee_limit_defaults_to_the_baseline_when_mint_fee_is_low(client: TestClient, node: FakeNode, mint_note):
+    # base_fee_msat is 0 in tests by default (see conftest.py) - the
+    # baseline (max(0.5%, 5000msat)) must still apply, not a 0 msat cap
+    # that would make melting fail to find almost any real route
+    k1 = mint_note(2_000_000)
+    pr = fake_invoice(2_000_000)
+    client.get(f"/w/cb?k1={k1}&pr={pr}")
+    assert node.last_fee_limit_msat == max(round(2_000_000 * 0.005), 5000)
+
+
+def test_melt_fee_limit_follows_a_higher_configured_mint_fee(
+    client: TestClient, node: FakeNode, mint_note, monkeypatch
+):
+    # LUD-25: the mint fee "is meant to cover whatever routing cost
+    # SERVICE incurs paying out this note when it is eventually melted" -
+    # an operator charging more than the baseline should get a
+    # correspondingly higher routing-fee budget for this melt. Minted
+    # fee-free first so the note's own value stays a clean 2_000_000 (see
+    # test_split_deducts_base_fee_from_change_when_mint_charges_fees for
+    # this same pattern) - the fee only needs to apply at melt time.
+    k1 = mint_note(2_000_000)
+    monkeypatch.setattr(settings, "base_fee_msat", 50_000)  # well above the 5000msat/0.5% baseline for this amount
+    pr = fake_invoice(2_000_000)
+    client.get(f"/w/cb?k1={k1}&pr={pr}")
+    assert node.last_fee_limit_msat == 50_000
+
+
 def test_melt_rejects_multiple_k1s(client: TestClient, node: FakeNode, mint_note):
     # pr MUST NOT be combined with multiple k1s - merge first
     a, b = mint_note(2000), mint_note(3000)

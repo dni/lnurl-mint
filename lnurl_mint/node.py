@@ -91,15 +91,20 @@ class PaymentResult(NamedTuple):
     fee_msat: int | None  # None if the backend's response didn't include one
 
 
-async def pay_invoice(invoice: str, config: LightningBackendConfig) -> PaymentResult:
+async def pay_invoice(invoice: str, config: LightningBackendConfig, fee_limit_msat: int) -> PaymentResult:
+    """`fee_limit_msat` is an absolute cap on the routing fee this payment
+    may spend - the caller's responsibility to size (see router.py's
+    _melt_fee_limit_msat), not guessed at here; neither backend's own
+    built-in default has any notion of what this mint charges to mint a
+    note this size in the first place."""
     if config.backend == "lnd":
         if not config.url or not config.macaroon:
             raise ValueError("Macaroon is required.")
-        return await _pay_invoice_lnd(invoice, config.url, config.macaroon.get_secret_value(), config)
+        return await _pay_invoice_lnd(invoice, config.url, config.macaroon.get_secret_value(), config, fee_limit_msat)
     if config.backend == "cln":
         if not config.url or not config.rune:
             raise ValueError("Rune is required.")
-        return await _pay_invoice_cln(invoice, config.url, config.rune.get_secret_value(), config)
+        return await _pay_invoice_cln(invoice, config.url, config.rune.get_secret_value(), config, fee_limit_msat)
     raise ValueError(f"pay_invoice is not supported for backend {config.backend!r}.")
 
 
@@ -210,7 +215,9 @@ async def _create_invoice_lnd(
     return payment_request, preimage
 
 
-async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: LightningBackendConfig) -> PaymentResult:
+async def _pay_invoice_lnd(
+    invoice: str, url: str, macaroon: str, config: LightningBackendConfig, fee_limit_msat: int
+) -> PaymentResult:
     # the non-streaming SendPaymentSync RPC is deprecated in favour of the
     # router's SendPaymentV2, which streams a Payment update per attempt
     # over chunked HTTP until a terminal SUCCEEDED/FAILED status
@@ -222,7 +229,7 @@ async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: Lightn
             json={
                 "payment_request": invoice,
                 "timeout_seconds": 60,
-                "fee_limit_msat": str(_lnd_fee_limit_msat(invoice)),
+                "fee_limit_msat": str(fee_limit_msat),
             },
         ) as res:
             await _raise_for_status(res)
@@ -308,12 +315,6 @@ async def _is_payment_complete_lnd(payment_hash: str, url: str, macaroon: str, c
     raise ValueError("lnd did not report a payment status.")
 
 
-def _lnd_fee_limit_msat(invoice: str) -> int:
-    amount_msat = bolt11.decode(invoice).amount_msat or 0
-    # mirrors cln's pay defaults (0.5% maxfeepercent, 5000 msat exemptfee floor)
-    return max(round(amount_msat * 0.005), 5000)
-
-
 _ZBASE32_ALPHABET = "ybndrfg8ejkmcpqxot1uwisza345h769"
 
 
@@ -372,7 +373,9 @@ async def _create_invoice_cln(
     return bolt11_str, preimage
 
 
-async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningBackendConfig) -> PaymentResult:
+async def _pay_invoice_cln(
+    invoice: str, url: str, rune: str, config: LightningBackendConfig, fee_limit_msat: int
+) -> PaymentResult:
     # xpay (CLN's newer payment engine, superseding the legacy `pay`)
     # resolves once it stops retrying - but "stops retrying" only means it
     # gives up trying new routes for parts that haven't landed anywhere
@@ -386,8 +389,16 @@ async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningB
     # comfortably above xpay's own default 60s retry_for so our client
     # doesn't time out right as xpay is about to answer, which would
     # otherwise turn a clean failure response into an ambiguous one.
+    #
+    # maxfee (msat): without it, xpay falls back to its own default
+    # (max(5000msat, 1%) per its docs) - explicit here so both backends
+    # spend from the same fee budget the caller computed (see
+    # router._melt_fee_limit_msat), not each backend's own unrelated
+    # built-in guess.
     async with httpx.AsyncClient(verify=config.verify, timeout=90.0) as client:
-        res = await client.post(f"{url}/v1/xpay", headers={"Rune": rune}, json={"invstring": invoice})
+        res = await client.post(
+            f"{url}/v1/xpay", headers={"Rune": rune}, json={"invstring": invoice, "maxfee": fee_limit_msat}
+        )
         try:
             await _raise_for_status(res)
         except httpx.HTTPStatusError as exc:

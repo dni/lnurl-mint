@@ -88,7 +88,7 @@ class HodlNode:
     async def invoice_preimage(self, ph, config):
         return self.preimages.get(ph) if ph in self.settled else None
 
-    async def pay_invoice(self, invoice, config):
+    async def pay_invoice(self, invoice, config, fee_limit_msat):
         if self.pay_mode == "ambiguous":
             # lnd: stream ends without terminal status -> ValueError.
             # Reality: the HTLC stays in flight.

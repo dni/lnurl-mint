@@ -137,7 +137,7 @@ async def _melt_pay(
     assert amount_msat is not None
 
     try:
-        result = await pay_invoice(pr, funding_source)
+        result = await pay_invoice(pr, funding_source, _melt_fee_limit_msat(amount_msat))
     except Exception as exc:
         if not decoded.has_payment_hash:
             log_internal_error(f"melt {note_ids}: error paying invoice, nothing to confirm against - left pending", exc)
@@ -296,6 +296,21 @@ def _mint_fee_msat(amount_msat: int) -> int:
     advertised `Mint fees: ` metadata entry (see _pay_response)."""
     fee_msat = settings.base_fee_msat + (amount_msat * settings.fee_percent_ppm) // 1_000_000
     return -(-fee_msat // 1000) * 1000
+
+
+def _melt_fee_limit_msat(amount_msat: int) -> int:
+    """The routing-fee budget for melting a note worth `amount_msat` - per
+    LUD-25, the mint fee withheld at mint time "is meant to cover whatever
+    routing cost SERVICE incurs paying out this note when it is eventually
+    melted", so an operator charging more gets a correspondingly higher
+    tolerance for this specific melt to actually find a route, rather than
+    a value unrelated to what this mint actually charges (previously: a
+    flat 0.5%-or-5000msat guess for lnd, cln's xpay left to its own
+    built-in max(5000msat, 1%) default). Never less than that same
+    0.5%/5000msat floor, though - a fee-free or low-flat-fee mint's melts
+    must not start failing to route just because their configured fee
+    alone would be too tight a cap for a large note."""
+    return max(round(amount_msat * 0.005), 5000, _mint_fee_msat(amount_msat))
 
 
 def _pay_response(req: Request) -> LnurlPayResponse:

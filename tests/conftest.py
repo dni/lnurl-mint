@@ -89,6 +89,10 @@ class FakeNode:
         # what a real lnd/cln backend returns alongside the preimage, for
         # tests of mint_log.log_melt's fee reporting
         self.pay_fee_msat: int | None = 0
+        # fee_limit_msat pay_invoice was actually called with - lets tests
+        # assert on router._melt_fee_limit_msat's output without
+        # duplicating its formula
+        self.last_fee_limit_msat: int | None = None
         # a real keypair, standing in for the node's own identity key - lets
         # tests of LUD-XX Offline verification (signing.mint_pubkey/
         # sign_note) exercise the real "Lightning Signed Message" signing
@@ -114,7 +118,8 @@ class FakeNode:
             return None
         return self.preimages.get(payment_hash)
 
-    async def pay_invoice(self, invoice: str, config) -> PaymentResult:
+    async def pay_invoice(self, invoice: str, config, fee_limit_msat: int) -> PaymentResult:
+        self.last_fee_limit_msat = fee_limit_msat
         if self.pay_delay:
             await asyncio.sleep(self.pay_delay)
         if self.fail_reason is not None:
