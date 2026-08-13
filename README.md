@@ -18,7 +18,7 @@ a reference wallet implementation (hosted at
 |-----------------|-------------------------------------------------------------------------------|
 | `GET /`         | one-pager frontend: mint QR code (LNURL of `/p`), lightning address, node info |
 | `GET /p`      | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement)      |
-| `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid             |
+| `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb`      |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |

@@ -21,11 +21,21 @@ class LnurlPayActionResponse(BaseModel):
     payment preimage.
 
     `verify` (LUD-21, optional) lets a wallet with no node of its own poll
-    settlement status - omitted unless VERIFY_ENABLED is set."""
+    settlement status - omitted unless VERIFY_ENABLED is set.
+
+    `disposable` (LUD-11) tells a WALLET whether the payRequest LNURL/
+    lightning address itself (not this one invoice) is meant to be kept
+    around and reused - always `false` here: `/p` and the LUD-16 address
+    are this mint's permanent, repeatable way to mint a fresh note, not a
+    one-shot link that stops working after this payment. Per LUD-11, a
+    WALLET that doesn't recognize this field at all is required to treat
+    a link as disposable by default and may discard it - `false` must be
+    sent explicitly, omitting it would silently undo that."""
 
     pr: str
     routes: list = []
     verify: str | None = None
+    disposable: bool = False
 
 
 class LnurlPayVerifyResponse(BaseModel):

@@ -42,6 +42,15 @@ def test_paid_invoice_preimage_becomes_a_bearer_note(client: TestClient, node: F
     assert note_value(client, k1) == 5000
 
 
+def test_pay_callback_advertises_the_lnaddress_as_not_disposable(client: TestClient, node: FakeNode):
+    # LUD-11: this mint's payRequest/lightning address is a permanent,
+    # repeatable way to mint fresh notes, not a one-shot link - a WALLET
+    # that doesn't recognize `disposable` at all must otherwise assume
+    # `true` and may discard it, so this has to be sent explicitly
+    response = client.get("/p/cb?amount=5000")
+    assert response.json()["disposable"] is False
+
+
 def test_pay_callback_enforces_sendable_bounds(client: TestClient):
     assert client.get("/p/cb?amount=1").json()["status"] == "ERROR"
     assert client.get("/p/cb?amount=999999999999").json()["status"] == "ERROR"
