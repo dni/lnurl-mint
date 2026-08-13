@@ -44,7 +44,7 @@ import lnurl_mint.frontend as frontend_module
 import lnurl_mint.router as router_module
 import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
-from lnurl_mint.node import NodeInfo, PaymentFailed
+from lnurl_mint.node import NodeInfo, PaymentFailed, PaymentResult
 from lnurl_mint.server import app
 
 
@@ -85,6 +85,10 @@ class FakeNode:
         # an in-flight payment for tests of the melt "pending" lock, which
         # otherwise has no observable window in a single-threaded test
         self.pay_delay = 0.0
+        # routing fee pay_invoice reports on a successful payment - mirrors
+        # what a real lnd/cln backend returns alongside the preimage, for
+        # tests of mint_log.log_melt's fee reporting
+        self.pay_fee_msat: int | None = 0
         # a real keypair, standing in for the node's own identity key - lets
         # tests of LUD-XX Offline verification (signing.mint_pubkey/
         # sign_note) exercise the real "Lightning Signed Message" signing
@@ -110,7 +114,7 @@ class FakeNode:
             return None
         return self.preimages.get(payment_hash)
 
-    async def pay_invoice(self, invoice: str, config) -> bytes:
+    async def pay_invoice(self, invoice: str, config) -> PaymentResult:
         if self.pay_delay:
             await asyncio.sleep(self.pay_delay)
         if self.fail_reason is not None:
@@ -118,7 +122,7 @@ class FakeNode:
         if self.fail_payments:
             raise ValueError("Payment failed: no route.")
         self.paid.append(invoice)
-        return urandom(32)
+        return PaymentResult(urandom(32), self.pay_fee_msat)
 
     async def is_payment_complete(self, payment_hash: str, config) -> bool:
         self.is_payment_complete_called = True

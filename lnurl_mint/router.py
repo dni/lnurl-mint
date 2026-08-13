@@ -13,6 +13,7 @@ from .config import settings
 from .db import PendingNoteError, notes
 from .error_handler import LnurlErrorResponseHandler
 from .errors import log_internal_error
+from .mint_log import log_melt, log_mint
 from .models import (
     LnurlPayActionResponse,
     LnurlPayResponse,
@@ -129,8 +130,14 @@ async def _melt_pay(
     # - and only finalizes once it confirms the opposite. If it can't
     # confirm either way, the notes are left pending rather than guessed
     # at in either direction.
+    # decoded.amount_msat is already validated equal to total_msat by the
+    # caller (get_withdraw_callback) before this background task is even
+    # scheduled - an amountless invoice would already have failed there
+    amount_msat = decoded.amount_msat
+    assert amount_msat is not None
+
     try:
-        await pay_invoice(pr, funding_source)
+        result = await pay_invoice(pr, funding_source)
     except Exception as exc:
         if not decoded.has_payment_hash:
             log_internal_error(f"melt {note_ids}: error paying invoice, nothing to confirm against - left pending", exc)
@@ -144,9 +151,14 @@ async def _melt_pay(
             notes.restore(note_ids)
             return
         notes.finalize_melt(note_ids)
+        # routing fee unknown here - confirmed via is_payment_complete
+        # (a status check), not pay_invoice's own response, which is the
+        # only place either backend reports the fee actually paid
+        log_melt(note_ids, amount_msat, None)
         return
 
     notes.finalize_melt(note_ids)
+    log_melt(note_ids, amount_msat, result.fee_msat)
 
 
 async def reconcile_pending_melts(funding_source: LightningBackendConfig) -> None:
@@ -177,8 +189,14 @@ async def reconcile_pending_melts(funding_source: LightningBackendConfig) -> Non
             )
             continue
         if completed:
+            # fetched before finalize_melt, which marks these spent - a
+            # spent note's own value is no longer readable afterward
+            amount_msat = sum(notes.note_amount(note_id) or 0 for note_id in note_ids)
             notes.finalize_melt(note_ids)
             logging.info("reconcile: melt %s confirmed paid at boot - finalized", note_ids)
+            # routing fee unknown here too, same reason as _melt_pay's own
+            # is_payment_complete-confirmed path
+            log_melt(note_ids, amount_msat, None)
         else:
             notes.restore(note_ids)
             logging.info("reconcile: melt %s confirmed not paid at boot - restored", note_ids)
@@ -208,8 +226,25 @@ async def _mint_settled(payment_hash: str) -> bool:
         return False
     if not await is_invoice_settled(payment_hash, funding_source):
         return False
-    notes.settle_mint(payment_hash)
+    net_amount_msat = notes.settle_mint(payment_hash)
+    if net_amount_msat is not None:
+        # None means a concurrent request already settled this same
+        # invoice first (see NoteStore.settle_mint) - only the call that
+        # actually performed the transition logs it, never both
+        _log_mint_settled(payment_hash, net_amount_msat)
     return True
+
+
+def _log_mint_settled(payment_hash: str, net_amount_msat: int) -> None:
+    pr = notes.mint_pr(payment_hash)
+    gross_amount_msat = None
+    if pr:
+        try:
+            gross_amount_msat = bolt11.decode(pr).amount_msat
+        except Exception:
+            gross_amount_msat = None
+    fee_msat = gross_amount_msat - net_amount_msat if gross_amount_msat is not None else None
+    log_mint(payment_hash, gross_amount_msat, fee_msat, net_amount_msat)
 
 
 async def _mint_preimage(payment_hash: str) -> str | None:

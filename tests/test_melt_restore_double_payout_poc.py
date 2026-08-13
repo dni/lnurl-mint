@@ -39,7 +39,7 @@ from fastapi.testclient import TestClient
 import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from lnurl_mint.node import PaymentFailed
+from lnurl_mint.node import PaymentFailed, PaymentResult
 from lnurl_mint.server import app
 
 VALUE = 100_000
@@ -105,7 +105,7 @@ class HodlNode:
             # unlike "failed" above where one is (deliberately) held open
             raise PaymentFailed("Could not find a route to pay this invoice.")
         self.paid_out.append(invoice)
-        return urandom(32)
+        return PaymentResult(urandom(32), None)
 
     async def is_payment_complete(self, payment_hash, config):
         self.is_payment_complete_calls += 1

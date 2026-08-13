@@ -3,7 +3,7 @@ import ssl
 from base64 import b64decode, b64encode
 from hashlib import sha256
 from os import urandom
-from typing import Literal
+from typing import Literal, NamedTuple
 from urllib.parse import quote
 
 import bolt11
@@ -82,7 +82,16 @@ async def create_invoice(
     raise ValueError(f"create_invoice is not supported for backend {config.backend!r}.")
 
 
-async def pay_invoice(invoice: str, config: LightningBackendConfig) -> bytes:
+class PaymentResult(NamedTuple):
+    """A completed outgoing payment - both backends report the actual
+    routing fee paid alongside the preimage, which mint_log.log_melt uses
+    for its accounting record (see router.py's melt path)."""
+
+    preimage: bytes
+    fee_msat: int | None  # None if the backend's response didn't include one
+
+
+async def pay_invoice(invoice: str, config: LightningBackendConfig) -> PaymentResult:
     if config.backend == "lnd":
         if not config.url or not config.macaroon:
             raise ValueError("Macaroon is required.")
@@ -201,7 +210,7 @@ async def _create_invoice_lnd(
     return payment_request, preimage
 
 
-async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: LightningBackendConfig) -> bytes:
+async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: LightningBackendConfig) -> PaymentResult:
     # the non-streaming SendPaymentSync RPC is deprecated in favour of the
     # router's SendPaymentV2, which streams a Payment update per attempt
     # over chunked HTTP until a terminal SUCCEEDED/FAILED status
@@ -241,7 +250,8 @@ async def _pay_invoice_lnd(invoice: str, url: str, macaroon: str, config: Lightn
         raise ValueError("lnd did not return a payment_preimage.")
     preimage = _decode_hex_or_base64(preimage_hex)
     _verify_preimage(preimage, invoice)
-    return preimage
+    fee_msat = payment.get("fee_msat")
+    return PaymentResult(preimage, int(fee_msat) if fee_msat is not None else None)
 
 
 _LND_FAILURE_REASONS = {
@@ -362,7 +372,7 @@ async def _create_invoice_cln(
     return bolt11_str, preimage
 
 
-async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningBackendConfig) -> bytes:
+async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningBackendConfig) -> PaymentResult:
     # xpay (CLN's newer payment engine, superseding the legacy `pay`)
     # resolves once it stops retrying - but "stops retrying" only means it
     # gives up trying new routes for parts that haven't landed anywhere
@@ -389,7 +399,15 @@ async def _pay_invoice_cln(invoice: str, url: str, rune: str, config: LightningB
         raise ValueError("cln did not return a payment_preimage.")
     preimage = _decode_hex_or_base64(preimage_hex)
     _verify_preimage(preimage, invoice)
-    return preimage
+    # xpay reports amount_msat (what the destination received) and
+    # amount_sent_msat (what actually left this node) separately - the gap
+    # between them is the routing fee, the same convention cln's pay and
+    # listpays both use
+    amount_msat, amount_sent_msat = payment.get("amount_msat"), payment.get("amount_sent_msat")
+    fee_msat = (
+        int(amount_sent_msat) - int(amount_msat) if amount_msat is not None and amount_sent_msat is not None else None
+    )
+    return PaymentResult(preimage, fee_msat)
 
 
 # xpay's documented failure codes - https://docs.corelightning.org/reference/xpay

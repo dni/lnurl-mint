@@ -4,5 +4,6 @@ __pycache__/
 .env
 *.db
 error.log
+mint.log
 .pytest_cache/
 dist/
