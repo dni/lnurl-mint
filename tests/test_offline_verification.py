@@ -1,3 +1,5 @@
+import logging
+
 from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
@@ -95,3 +97,29 @@ def test_signing_failure_is_swallowed_not_raised(client: TestClient, mint_note, 
     data = client.get(f"/w/cb?k1={k1}").json()
     assert data["status"] == "OK"
     assert "signature" not in data
+
+
+def test_signing_failure_is_still_logged(client: TestClient, mint_note, node, monkeypatch, caplog):
+    # regression: sign_note used to swallow every exception with zero
+    # trace anywhere - a persistently broken signing RPC (e.g. a macaroon/
+    # rune scoped without signmessage permission) was then indistinguishable
+    # from "offline verification just isn't configured", from the logs alone
+    async def _broken_sign_message(message, config):
+        raise ConnectionError("Not permitted: missing signmessage permission")
+
+    monkeypatch.setattr("lnurl_mint.signing.sign_message", _broken_sign_message)
+    k1 = mint_note(5000)
+    with caplog.at_level(logging.WARNING):
+        client.get(f"/w/cb?k1={k1}")
+    assert any("sign_note" in r.message and "missing signmessage permission" in r.message for r in caplog.records)
+
+
+def test_mint_pubkey_failure_is_logged(client: TestClient, mint_note, node, monkeypatch, caplog):
+    async def _broken_fetch_node_info(config):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr("lnurl_mint.signing.fetch_node_info", _broken_fetch_node_info)
+    k1 = mint_note(5000)
+    with caplog.at_level(logging.WARNING):
+        client.get(f"/w?k1={k1}")
+    assert any("mint_pubkey" in r.message and "connection refused" in r.message for r in caplog.records)

@@ -1,3 +1,4 @@
+import logging
 from hashlib import sha256
 
 from coincurve import PublicKey
@@ -34,7 +35,11 @@ async def mint_pubkey(config: LightningBackendConfig) -> str | None:
         return None
     try:
         info = await fetch_node_info(config)
-    except Exception:
+    except Exception as exc:
+        # not raised (offline verification is optional, see this
+        # function's own docstring) but must not vanish with zero trace
+        # either - see sign_note's own except below for the same reasoning
+        logging.warning("mint_pubkey: could not reach %s funding source: %s", config.backend, exc)
         return None
     return info.uri.split("@")[0] if info.uri else None
 
@@ -52,7 +57,14 @@ async def sign_note(k1: str, amount_msat: int, config: LightningBackendConfig) -
         return None
     try:
         r_s, recovery_id = await sign_message(_message(k1, amount_msat), config)
-    except Exception:
+    except Exception as exc:
+        # not raised (see this function's own docstring) but must not
+        # vanish with zero trace either - a signing RPC that always fails
+        # (e.g. a macaroon/rune scoped without signmessage permission)
+        # would otherwise look identical to "everything's fine, offline
+        # verification is just turned off", indistinguishable from the
+        # logs alone
+        logging.warning("sign_note: could not sign via %s funding source: %s", config.backend, exc)
         return None
     return (r_s + bytes([recovery_id])).hex()
 
