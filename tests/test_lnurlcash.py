@@ -1,6 +1,5 @@
 import json
 import threading
-import time
 from hashlib import sha256
 from os import urandom
 
@@ -8,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
+from lnurl_mint.db import notes
 from tests.conftest import FakeNode, fake_invoice
 
 
@@ -354,23 +354,48 @@ def test_failed_payment_restores_the_notes(client: TestClient, node: FakeNode, m
     assert note_value(client, k1) == 5000
 
 
-def test_pending_note_rejects_concurrent_operations(client: TestClient, node: FakeNode, mint_note):
-    # while a melt's outgoing payment is in flight, its k1 is reserved but
-    # not yet burned - any other callback naming it must be rejected with
-    # reason "pending", not treated as merely invalid/spent
-    k1 = mint_note(5000)
-    pr = fake_invoice(5000)
-    node.pay_delay = 0.3
+def _melt_in_background(client: TestClient, k1: str, pr: str, monkeypatch) -> threading.Thread:
+    """Starts a melt in a background thread and blocks until it has
+    actually marked the note pending, before returning - deterministic,
+    unlike racing a fixed `time.sleep()` against thread startup and
+    request-dispatch overhead, which is exactly the kind of guess that
+    passes reliably on a quiet machine and flakes under load (thread
+    scheduling delay pushing past the sleep before the melt even reaches
+    mark_pending). node.pay_delay (still set by the caller) is what keeps
+    the pending window open long enough afterward for the caller's own
+    concurrent request to observe it."""
     result: dict = {}
+    marked_pending = threading.Event()
+    real_mark_pending = notes.mark_pending
+
+    def _mark_pending_and_signal(note_ids, payment_hash):
+        real_mark_pending(note_ids, payment_hash)
+        marked_pending.set()
+
+    monkeypatch.setattr(notes, "mark_pending", _mark_pending_and_signal)
 
     def melt():
         result["melt"] = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
 
     thread = threading.Thread(target=melt)
     thread.start()
-    time.sleep(0.1)  # let the melt mark the note pending before racing it
+    assert marked_pending.wait(timeout=5), "melt never marked the note pending"
+    thread.result = result  # type: ignore[attr-defined]
+    return thread
+
+
+def test_pending_note_rejects_concurrent_operations(client: TestClient, node: FakeNode, mint_note, monkeypatch):
+    # while a melt's outgoing payment is in flight, its k1 is reserved but
+    # not yet burned - any other callback naming it must be rejected with
+    # reason "pending", not treated as merely invalid/spent
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    node.pay_delay = 0.3
+
+    thread = _melt_in_background(client, k1, pr, monkeypatch)
     concurrent = client.get(f"/w/cb?k1={k1}").json()
     thread.join()
+    result = thread.result  # type: ignore[attr-defined]
 
     assert concurrent == {"status": "ERROR", "reason": "pending"}
     assert result["melt"]["status"] == "OK"
@@ -378,21 +403,16 @@ def test_pending_note_rejects_concurrent_operations(client: TestClient, node: Fa
     assert note_value(client, k1) is None
 
 
-def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node: FakeNode, mint_note):
+def test_pending_note_is_released_if_the_payment_fails(client: TestClient, node: FakeNode, mint_note, monkeypatch):
     k1 = mint_note(5000)
     pr = fake_invoice(5000)
     node.pay_delay = 0.3
     node.fail_payments = True
-    result: dict = {}
 
-    def melt():
-        result["melt"] = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
-
-    thread = threading.Thread(target=melt)
-    thread.start()
-    time.sleep(0.1)
+    thread = _melt_in_background(client, k1, pr, monkeypatch)
     concurrent = client.get(f"/w/cb?k1={k1}").json()
     thread.join()
+    result = thread.result  # type: ignore[attr-defined]
 
     assert concurrent == {"status": "ERROR", "reason": "pending"}
     # the callback itself already replied OK (per LUD-03, before the
@@ -606,8 +626,6 @@ def test_withdraw_ignores_the_declared_amount(client: TestClient, mint_note):
 
 
 def test_no_bearer_secret_is_ever_persisted(client: TestClient, mint_note):
-    from lnurl_mint.db import notes
-
     k1 = mint_note(5000)
     data = client.get(f"/w/cb?k1={k1}&amount=2000").json()
     stored = str(notes.conn.execute("SELECT * FROM notes").fetchall())
