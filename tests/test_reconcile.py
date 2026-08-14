@@ -9,7 +9,7 @@ import lnurl_mint.router as router_module
 import lnurl_mint.server as server_module
 from lnurl_mint.config import settings
 from lnurl_mint.server import app
-from tests.conftest import FakeNode, fake_invoice
+from tests.conftest import FakeNode, fake_invoice, fresh_secret
 
 
 def _leave_a_note_pending(client: TestClient, node: FakeNode, mint_note, amount_msat: int = 5000) -> str:
@@ -21,7 +21,8 @@ def _leave_a_note_pending(client: TestClient, node: FakeNode, mint_note, amount_
     node.is_payment_complete_raises = True
     pr = fake_invoice(amount_msat)
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
-    assert client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+    _, h = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
     return k1
 
 
@@ -45,7 +46,8 @@ def test_reconcile_restores_a_pending_note_once_confirmed_not_paid(client: TestC
 
     assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == 5000
     # no longer pending - a fresh melt is accepted again
-    assert client.get(f"/w/cb?k1={k1}").json()["status"] == "OK"
+    _, h = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
 
 
 def test_reconcile_leaves_still_unconfirmable_notes_pending_without_retrying(
@@ -60,7 +62,8 @@ def test_reconcile_leaves_still_unconfirmable_notes_pending_without_retrying(
     asyncio.run(router_module.reconcile_pending_melts(settings.funding_source()))
 
     assert node.is_payment_complete_calls == 1
-    assert client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+    _, h = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
 
 
 def test_reconcile_writes_still_unconfirmed_notes_to_error_log(
@@ -122,7 +125,8 @@ def test_periodic_monitor_reconciles_a_note_that_resolves_after_boot(
     with TestClient(app):
         # still unresolvable when this process boots - matches the state
         # the note was left in
-        assert client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+        _, h = fresh_secret()
+        assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
 
         # only now does the underlying payment become confirmable - no
         # further boot happens, only the periodic monitor's own later tick

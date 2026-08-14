@@ -1,7 +1,5 @@
 import sqlite3
 import threading
-from hashlib import sha256
-from os import urandom
 
 from .config import settings
 from .errors import log_internal_error
@@ -18,13 +16,16 @@ class NoteStore:
     """The set of outstanding bearer notes this mint has issued, plus the
     pending mints (invoices whose preimage becomes a note once paid).
 
-    Per the spec's security considerations, no spendable secret is ever
-    persisted: a note is keyed by its id - sha256(k1) - so a leaked
-    database reveals how many notes are outstanding and for how much, but
-    lets nobody spend them. For a minted note that id is exactly the
-    payment hash of the invoice that funded it, which is why `mints` needs
-    no preimage column and settling one is a plain insert under the same
-    key. Burned notes are kept with spent=1 rather than deleted, so a
+    No spendable secret is ever persisted: a note is keyed by its id -
+    sha256(k1) - so a leaked database reveals how many notes are
+    outstanding and for how much, but lets nobody spend them. For a
+    minted note that id is exactly the payment hash of the invoice that
+    funded it, which is why `mints` needs no preimage column and
+    settling one is a plain insert under the same key. For a rotated,
+    split or merged note (LUD-25), the id is a hash the WALLET itself
+    generated and disclosed (`h`/`h2`) - this store (and this mint)
+    never has the secret to begin with, on top of never persisting it.
+    Burned notes are kept with spent=1 rather than deleted, so a
     replayed k1 fails as "already spent" instead of dangling.
 
     Every operation that burns and/or mints runs in a single transaction:
@@ -138,17 +139,21 @@ class NoteStore:
         row = self.conn.execute("SELECT amount_msat FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
         return row[0] if row else None
 
-    def swap(self, burn_ids: list[str], mint_amounts: list[int]) -> list[str]:
+    def swap(self, burn_ids: list[str], mint_note_ids: list[str], mint_amounts: list[int]) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
-        per amount in `mint_amounts`, returning the new bearer secrets -
-        the only time they ever exist on this side; only their hashes are
-        stored. Raises ValueError - burning and minting nothing - if any id
-        is unknown, already spent, or repeated (the second burn of a
-        duplicate finds it spent by the first). Raises PendingNoteError
-        instead if any id is reserved by an in-flight melt (see
-        mark_pending): per the spec, that's a distinct "pending" rejection,
-        not a plain invalid/spent one."""
-        new_k1s = [urandom(32).hex() for _ in mint_amounts]
+        per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,
+        `mint_note_ids` are hashes the WALLET itself generated and
+        disclosed (`h`/`h2` on the callback) - this side never generates,
+        sees, or persists the underlying secret, only registers a note
+        under the hash it was given. Raises ValueError - burning and
+        minting nothing - if any burn id is unknown, already spent, or
+        repeated (the second burn of a duplicate finds it spent by the
+        first), or if any mint id collides with an existing note (a
+        WALLET generating a fresh, unpredictable preimage each time
+        should never hit this honestly). Raises PendingNoteError instead
+        if any burn id is reserved by an in-flight melt (see
+        mark_pending): per the spec, that's a distinct "pending"
+        rejection, not a plain invalid/spent one."""
         with self._lock:
             try:
                 with self.conn:
@@ -161,14 +166,12 @@ class NoteStore:
                         if row[0]:
                             raise PendingNoteError("pending")
                         self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
-                    for k1, amount_msat in zip(new_k1s, mint_amounts):
-                        note_id = sha256(bytes.fromhex(k1)).hexdigest()
+                    for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
             except sqlite3.Error as exc:
                 # exc's own text (raw sqlite3 error) is never handed back on
                 # the wire - see log_internal_error
                 raise ValueError(log_internal_error("Note swap failed", exc)) from exc
-        return new_k1s
 
     def mark_pending(self, note_ids: list[str], payment_hash: str) -> None:
         """Reserve `note_ids` for an in-flight melt without burning them yet.

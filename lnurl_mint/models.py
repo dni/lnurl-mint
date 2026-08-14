@@ -44,12 +44,14 @@ class LnurlPayVerifyResponse(BaseModel):
     `preimage`, once settled, IS the freshly minted bearer note's spend
     secret (see LUD-XX's Minting a bearer note from a payRequest) - unlike
     a plain LUD-21 proof-of-payment, a wallet with no node of its own needs
-    it to claim and immediately rotate the note (per the spec's Security
-    considerations: `SERVICE`'s own node is a permanent prior holder of a
-    freshly minted note's secret, so deferring the rotate leaves that
-    exposure window open regardless of how promptly settlement was
-    checked). `status`/`settled`/`pr` otherwise behave exactly per
-    LUD-21."""
+    it to claim and immediately rotate the note: this mint's own node is a
+    permanent prior holder of a freshly minted note's secret (it generated
+    that preimage to fund the invoice in the first place - the one case
+    where LUD-25's WALLET-generates-the-secret rule can't apply, since the
+    secret has to come from the payment itself), so deferring the rotate
+    leaves that exposure window open regardless of how promptly
+    settlement was checked. `status`/`settled`/`pr` otherwise behave
+    exactly per LUD-21."""
 
     status: Literal["OK"] = "OK"
     settled: bool
@@ -76,20 +78,22 @@ class LnurlWithdrawResponse(BaseModel):
 
 
 class WithdrawSuccessResponse(BaseModel):
-    """LUD-03 success response, extended per lnurlcash: `k1` is the newly
-    minted bearer secret replacing the burned one(s) (rotate/merge/split),
-    `change` the remainder note after a split. A melt (pr given) carries
-    neither - None fields are excluded on the wire.
+    """LUD-03 success response, extended per lnurlcash. A melt (`pr` given)
+    carries nothing beyond `status` - no new note is minted.
 
-    `signature`/`changeSignature` (LUD-XX Offline verification, optional)
-    are recoverable signatures over `k1`/`change` respectively, letting a
-    holder verify the note offline against `mintPubkey` without contacting
-    this mint - omitted (like `k1`/`change`) whenever there's no new note,
-    and omitted entirely if no funding source is configured (see
-    signing.sign_note)."""
+    A rotate/split/merge (LUD-25) carries no secret at all: `WALLET`, not
+    this mint, generates the replacement note's preimage and discloses
+    only its hash (`h`, and `h2` for a split's change note) on the
+    callback request - this mint registers the note under that hash
+    directly and has nothing further to hand back. `sig`/`sig2` (LUD-XX
+    Offline verification, optional) are this mint's recoverable
+    signatures over `h`/`h2` respectively, letting `WALLET` obtain a
+    verifiable note without its secret ever having existed anywhere but
+    `WALLET` itself - omitted whenever there's no corresponding hash
+    (melt, or a plain rotate/merge never supplies `h2`), and omitted
+    entirely if no funding source is configured (see signing.sign_note).
+    None fields are excluded on the wire."""
 
     status: Literal["OK"] = "OK"
-    k1: str | None = None
-    change: str | None = None
-    signature: str | None = None
-    changeSignature: str | None = None
+    sig: str | None = None
+    sig2: str | None = None

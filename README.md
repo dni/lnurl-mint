@@ -29,9 +29,9 @@ Callback semantics (`/w/cb`):
 | `k1`  | `pr` | `amount` | Result                                                    |
 |-------|------|----------|-----------------------------------------------------------|
 | one   | yes  | –        | melt: note reserved, OK returned immediately, `pr` (of exactly its value) paid asynchronously, burned once settled |
-| one   | no   | no       | rotate: burned, fresh `k1'` of the same value returned    |
-| many  | no   | yes      | split: all burned, response carries `k1` (amount) + `change` |
-| many  | no   | –        | merge: all burned, one note worth the sum returned        |
+| one   | no   | no       | rotate: burned, a note keyed by `h` (of the same value) minted |
+| many  | no   | yes      | split: all burned, two notes minted - `amount` keyed by `h`, the remainder keyed by `h2` |
+| many  | no   | –        | merge: all burned, one note worth the sum minted, keyed by `h` |
 
 `pr` MUST NOT be combined with multiple `k1`s or with `amount`, melt several notes
 by merging them first. The informational endpoint's response always echoes the
@@ -39,6 +39,18 @@ literal secret it was queried with (never a derived id), and ignores an `amount`
 query param if present, notes may encode a wallet-declared value in their URL
 (`?k1=...&amount=...`) for offline display, but it is never authoritative;
 `maxWithdrawable` is.
+
+**`h`/`h2`** ([LUD-25](../luds/25.md)): whenever `pr` is absent (rotate, split,
+or merge), the caller (`WALLET`) - never this mint - generates the replacement
+note's secret, a fresh random preimage, and discloses only its sha256 hash as
+`h` (and, for a split's change note, `h2`). This mint registers the new note
+under that hash directly and never sees, generates, or persists the underlying
+preimage - the callback response for these carries no secret at all, just
+`{"status": "OK"}` (plus `sig`/`sig2` if offline verification is configured,
+see below). `h` is required whenever `pr` is absent; `h2` is additionally
+required whenever `amount` is too. A missing or malformed one fails with
+`{"status": "ERROR", "reason": "missing h"}` (or `"missing h2"`) rather than
+this mint generating a secret on `WALLET`'s behalf.
 
 Per the spec, `/w/cb` replies `{"status": "OK"}` for a melt as soon as the note
 is reserved, then pays `pr` asynchronously in the background - it does not wait
@@ -53,10 +65,11 @@ response is sent before the payment is even attempted, a melt failure is never
 reported back through this callback - only observable as the note becoming
 spendable again.
 
-Per the spec's security considerations, no spendable secret is ever persisted: notes
-are stored keyed by `sha256(k1)`, for a minted note that is exactly the payment
-hash of the invoice that funded it, so the preimage is discarded at invoice-creation
-time. The spec also asks `SERVICE` not to log query strings on the withdraw
+No spendable secret is ever persisted or, for a rotate/split/merge, even seen
+by this mint at all: notes are stored keyed by `sha256(k1)` - `h`/`h2` above,
+supplied by `WALLET` directly - and for a freshly minted note that id is
+exactly the payment hash of the invoice that funded it, so the preimage is
+discarded at invoice-creation time. The spec also asks `SERVICE` not to log query strings on the withdraw
 endpoints, since a bearer note's `k1` can sit in one far longer than an ephemeral
 LUD-03 `k1` would, this mint disables uvicorn's per-request access log entirely
 (see `server.py`'s lifespan) rather than leave secrets in server logs by default;
@@ -80,9 +93,10 @@ wallet derives from the metadata formula above.
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key
 it signs BOLT-11 invoices with - and rotate/split/merge responses carry a
-recoverable `signature`/`changeSignature` over each new note, letting a holder
-verify a note's issuer and amount without contacting the mint (see
-`signing.py`). Notes are signed via the funding source's own signmessage RPC
+recoverable `sig`/`sig2` over each new note's hash (`h`/`h2`, supplied by
+`WALLET` - this mint signs exactly what it was given, never a secret it
+derived itself), letting a holder verify a note's issuer and amount without
+contacting the mint (see `signing.py`). Notes are signed via the funding source's own signmessage RPC
 (lnd's `/v1/signmessage`, cln's `signmessage`), which both wrap the message
 with the standard "Lightning Signed Message:" prefix and double-sha256 it
 before signing - the same convention other Lightning tooling already uses to

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import NoteStore
+from tests.conftest import fresh_secret
 
 
 def test_verify_url_absent_by_default(client: TestClient):
@@ -66,7 +67,8 @@ def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, mint_n
     assert result["settled"] is True
     assert result["preimage"] == k1
 
-    rotated = client.get(f"/w/cb?k1={k1}").json()
+    _, h = fresh_secret()
+    rotated = client.get(f"/w/cb?k1={k1}&h={h}").json()
     assert rotated["status"] == "OK"
 
     result = client.get(f"/verify/{payment_hash}").json()

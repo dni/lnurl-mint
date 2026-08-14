@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 import lnurl_mint.mint_log as mint_log_module
 import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
-from tests.conftest import FakeNode, fake_invoice
+from tests.conftest import FakeNode, fake_invoice, fresh_secret
 
 
 def _capture(monkeypatch, tmp_path):
@@ -95,7 +95,8 @@ def test_reconcile_logs_amount_when_confirming_a_stuck_melt(
     k1 = mint_note(5000)
     pr = fake_invoice(5000)
     client.get(f"/w/cb?k1={k1}&pr={pr}")
-    assert client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+    _, h = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
 
     node.is_payment_complete_raises = False
     node.payment_actually_completed = True

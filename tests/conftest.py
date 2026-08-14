@@ -48,6 +48,15 @@ from lnurl_mint.node import NodeInfo, PaymentFailed, PaymentResult
 from lnurl_mint.server import app
 
 
+def fresh_secret() -> tuple[str, str]:
+    """A (k1, h) pair for LUD-25's WALLET-generated rotate/split/merge
+    secret: k1 is what a real wallet (here, the test itself) would keep
+    and never transmit, h = sha256(k1) hex is what actually goes on the
+    /w/cb request as h/h2 - this mint is never given k1 itself for these."""
+    secret = urandom(32).hex()
+    return secret, sha256(bytes.fromhex(secret)).hexdigest()
+
+
 def fake_invoice(amount_msat: int, payment_hash: str | None = None) -> str:
     """A syntactically-valid (but unpayable) BOLT11 invoice, for faking the
     node without needing a real one."""

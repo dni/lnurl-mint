@@ -41,6 +41,7 @@ from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from lnurl_mint.node import PaymentFailed, PaymentResult
 from lnurl_mint.server import app
+from tests.conftest import fresh_secret
 
 VALUE = 100_000
 
@@ -164,7 +165,8 @@ def test_variant_a_ambiguous_failure_leaves_the_note_pending_not_restored(hodl_c
     assert res.json() == {"status": "OK"}  # per spec, OK before the payment attempt
     assert hodl.is_payment_complete_calls == 1  # confirmation consulted...
     assert outstanding(k1) == VALUE  # ...still outstanding, but frozen:
-    assert hodl_client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+    _, h = fresh_secret()
+    assert hodl_client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
 
     hodl.settle_hodl_payments()  # reality: funds leave the node now
 
@@ -190,7 +192,8 @@ def test_variant_b_payment_failed_is_still_confirmed_before_restoring(hodl_clien
     assert res.json() == {"status": "OK"}
     assert hodl.is_payment_complete_calls == 1  # confirmation is no longer skipped
     assert outstanding(k1) == VALUE  # still outstanding, but frozen:
-    assert hodl_client.get(f"/w/cb?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
+    _, h = fresh_secret()
+    assert hodl_client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
 
     hodl.settle_hodl_payments()  # the "definitively failed" payment settles late
 
