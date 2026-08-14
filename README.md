@@ -144,6 +144,26 @@ nothing else) - a comma-separated top-level list instead would AND further
 restrictions on top (e.g. `pnum=0` to also disallow all requests with
 parameters).
 
+**lnd macaroon**: `admin.macaroon` works, but this mint only ever calls
+`AddInvoice`/`LookupInvoice`, the router's `SendPaymentV2`/`TrackPaymentV2`,
+`SignMessage`, and `GetInfo` (see `node.py`) - scope `FUNDINGSOURCE_MACAROON`
+to just those instead of handing it full admin access:
+
+```sh
+lncli bakemacaroon invoices:write invoices:read offchain:write offchain:read message:write info:read --save_to=lnurl-mint.macaroon
+```
+
+Set `FUNDINGSOURCE_MACAROON` to the hex-encoded contents of that file
+(`xxd -p -c1000 lnurl-mint.macaroon`, or drop `--save_to` to have `lncli`
+print the hex directly instead of writing a file). `message:write` is the
+one easy to leave out and the one that breaks quietly: without it,
+`SignMessage` calls fail, and since offline verification (LUD-XX) is
+optional and never blocks a rotate/split/merge on failure (see
+`signing.sign_note`), a scoped-too-narrow macaroon shows up as every note
+silently missing its signature rather than an obvious error - check the
+logs for `sign_note: could not sign via lnd funding source: ...` if that
+happens.
+
 ## Docker
 
 ```sh
