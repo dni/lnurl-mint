@@ -235,9 +235,10 @@ def test_split_rejects_when_change_cannot_cover_the_base_fee(client: TestClient,
 def test_split_rejects_a_zero_value_change_note(client: TestClient, mint_note, monkeypatch):
     # regression: change_before_fee == base_fee_msat exactly used to pass
     # the old strict "<" check and mint a 0 msat change note - a bearer
-    # note for nothing must never be mintable, under any min_mint_msat.
-    # Minted fee-free first so the note's own value stays a clean 5000 -
-    # the fee only needs to apply to the split itself.
+    # note for nothing must never be mintable, independent of the fee-free
+    # min_mint_msat=0 configured here. Minted fee-free first so the note's
+    # own value stays a clean 5000 - the fee only needs to apply to the
+    # split itself.
     k1 = mint_note(5000)
     monkeypatch.setattr(settings, "min_mint_msat", 0)
     monkeypatch.setattr(settings, "base_fee_msat", 2000)
@@ -250,44 +251,21 @@ def test_split_rejects_a_zero_value_change_note(client: TestClient, mint_note, m
     assert note_value(client, k1) == 5000
 
 
-def test_split_rejects_change_below_min_mint_msat_even_when_fee_free(client: TestClient, mint_note, monkeypatch):
-    # dust prevention isn't only about the fee - a fee-free mint must still
-    # refuse to mint a change note under its own configured dust floor,
-    # the same one /p/cb enforces when minting fresh
+def test_split_ignores_min_mint_msat_on_both_sides(client: TestClient, mint_note, monkeypatch):
+    # min_mint_msat is /p/cb's own dust floor for a *fresh* mint - it MUST
+    # NOT leak into split: neither side of a split is a new mint, both come
+    # from value the wallet already holds, and LUD-25 defines no minimum
+    # for either. A high min_mint_msat here must not reject an otherwise
+    # tiny, but positive, amount or change.
     monkeypatch.setattr(settings, "base_fee_msat", 0)
-    monkeypatch.setattr(settings, "min_mint_msat", 1000)
-    k1 = mint_note(5000)
-    _, h = fresh_secret()
-    _, h2 = fresh_secret()
-    # amount=4500 leaves change worth 500 - positive, but under the floor
-    result = client.get(f"/w/cb?k1={k1}&amount=4500&h={h}&h2={h2}").json()
-    assert result == {"status": "ERROR", "reason": "insufficient value"}
-    assert note_value(client, k1) == 5000
-
-
-def test_split_rejects_amount_below_min_mint_msat(client: TestClient, mint_note, monkeypatch):
-    monkeypatch.setattr(settings, "min_mint_msat", 1000)
-    k1 = mint_note(5000)
-    _, h = fresh_secret()
-    _, h2 = fresh_secret()
-    result = client.get(f"/w/cb?k1={k1}&amount=500&h={h}&h2={h2}").json()
-    assert result == {
-        "status": "ERROR",
-        "reason": "amount too low to mint a note (min 1000 msat).",
-    }
-    assert note_value(client, k1) == 5000
-
-
-def test_split_succeeds_at_exactly_min_mint_msat_on_both_sides(client: TestClient, mint_note, monkeypatch):
-    monkeypatch.setattr(settings, "base_fee_msat", 0)
-    monkeypatch.setattr(settings, "min_mint_msat", 1000)
-    k1 = mint_note(5000)
+    k1 = mint_note(5000)  # minted before raising the floor - /p/cb is still bound by it
+    monkeypatch.setattr(settings, "min_mint_msat", 10_000)
     new_k1, h = fresh_secret()
     change_k1, h2 = fresh_secret()
-    data = client.get(f"/w/cb?k1={k1}&amount=1000&h={h}&h2={h2}").json()
+    data = client.get(f"/w/cb?k1={k1}&amount=1&h={h}&h2={h2}").json()
     assert data["status"] == "OK"
-    assert note_value(client, new_k1) == 1000
-    assert note_value(client, change_k1) == 4000
+    assert note_value(client, new_k1) == 1
+    assert note_value(client, change_k1) == 4999
 
 
 def test_merge_refunds_base_fee_for_every_extra_note(client: TestClient, mint_note, monkeypatch):

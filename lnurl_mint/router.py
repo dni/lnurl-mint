@@ -539,12 +539,11 @@ async def get_withdraw_callback(
     - many k1 + amount, no pr: split - all burned; two new notes are
       minted, one worth `amount` keyed by `h`, one worth the remainder
       (minus base_fee_msat if this mint charges fees, per LUD-25) keyed by
-      `h2`. Both sides must clear min_mint_msat - the same dust floor
-      /p/cb enforces at mint time, since neither side of a split may mint
-      a note the mint wouldn't have minted fresh: `amount` fails outright
-      if too low, `change` fails with reason "insufficient value" (the
-      same reason it already used when the fee alone couldn't be
-      covered).
+      `h2`. No min_mint_msat floor applies here - that's /p/cb's own dust
+      floor for a fresh mint, not a split of value the wallet already
+      holds - only that `change` can't go negative or land at exactly 0,
+      both "insufficient value" (the latter the same reason already used
+      when the fee alone couldn't be covered).
     - many k1, no pr, no amount: merge - all burned, one note keyed by
       `h` worth their sum minted, plus (n - 1) * base_fee_msat if this
       mint charges fees - refunding every base fee already collected
@@ -660,17 +659,12 @@ async def get_withdraw_callback(
         if amount is not None:
             if not 0 < amount < total_msat:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
-            # both sides of a split are freshly minted notes, so the same
-            # dust floor /p/cb enforces at mint time applies here too - a
-            # split must never be able to produce a note worth less than
-            # that just because it came from an existing note's value
-            # instead of a fresh invoice. `amount` is wallet-chosen, so
-            # this is checked separately from `change` below to give a
-            # message that points at which side was actually the problem.
-            if amount < settings.min_mint_msat:
-                raise HTTPException(
-                    HTTPStatus.BAD_REQUEST, f"amount too low to mint a note (min {settings.min_mint_msat} msat)."
-                )
+            # min_mint_msat is /p/cb's own dust floor for a *fresh* mint,
+            # funded by a brand new invoice - it does not apply here: a
+            # split's notes come from value the wallet already holds, not a
+            # new payment this mint has to justify collecting, and LUD-25
+            # itself defines no minimum for either side of a split.
+            #
             # per LUD-25, base_fee_msat (never fee_percent_ppm - that's
             # already been withheld once, at mint time) comes out of
             # change, not the requested amount, so a holder can't dodge it
@@ -680,16 +674,12 @@ async def get_withdraw_callback(
             if change_before_fee < settings.base_fee_msat:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, "insufficient value")
             change_amount = change_before_fee - settings.base_fee_msat
-            # strictly *less than* base_fee_msat above only guards against
-            # a negative change_amount - change_before_fee == base_fee_msat
+            # strictly *less than* base_fee_msat above only guards against a
+            # negative change_amount - change_before_fee == base_fee_msat
             # passes that check but leaves change_amount at exactly 0, a
-            # bearer note for nothing. max(1, ...) below closes that
-            # regardless of min_mint_msat's own configured value: a 0-msat
-            # note must never be mintable even on a mint that otherwise
-            # allows dust (min_mint_msat=0) - unlike the dust floor itself,
-            # this isn't a configurable preference, "nothing" is never a
-            # valid note value.
-            if change_amount < max(1, settings.min_mint_msat):
+            # bearer note for nothing: unlike a configurable dust floor,
+            # "nothing" is never a valid note value regardless of settings.
+            if change_amount < 1:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, "insufficient value")
             # h/h2 are validated present and well-formed above, whenever
             # pr is None and amount is not - both true in this branch
