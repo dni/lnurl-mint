@@ -75,6 +75,7 @@ class FakeNode:
         self.settled: set[str] = set()
         self.last_preimage: bytes = b""
         self.preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for invoice_preimage
+        self.melt_preimages: dict[str, bytes] = {}  # payment_hash -> preimage, for payment_preimage (LUD-25 verify)
         self.paid: list[str] = []
         self.fail_payments = False
         # for simulating a *definitive* pay_invoice failure - the funding
@@ -136,7 +137,11 @@ class FakeNode:
         if self.fail_payments:
             raise ValueError("Payment failed: no route.")
         self.paid.append(invoice)
-        return PaymentResult(urandom(32), self.pay_fee_msat)
+        preimage = urandom(32)
+        decoded_payment_hash = bolt11.decode(invoice).payment_hash
+        if decoded_payment_hash:
+            self.melt_preimages[decoded_payment_hash] = preimage
+        return PaymentResult(preimage, self.pay_fee_msat)
 
     async def is_payment_complete(self, payment_hash: str, config) -> bool:
         self.is_payment_complete_called = True
@@ -144,6 +149,11 @@ class FakeNode:
         if self.is_payment_complete_raises:
             raise ConnectionError("funding source unreachable")
         return self.payment_actually_completed
+
+    async def payment_preimage(self, payment_hash: str, config) -> bytes | None:
+        if not self.payment_actually_completed:
+            return None
+        return self.melt_preimages.get(payment_hash)
 
     async def fetch_node_info(self, config) -> NodeInfo:
         return NodeInfo(alias="fakenode", uri=f"{self.pubkey}@127.0.0.1:9735", num_channels=3, num_peers=5)
@@ -165,6 +175,7 @@ def node(monkeypatch: pytest.MonkeyPatch) -> FakeNode:
     monkeypatch.setattr(router_module, "invoice_preimage", fake.invoice_preimage)
     monkeypatch.setattr(router_module, "pay_invoice", fake.pay_invoice)
     monkeypatch.setattr(router_module, "is_payment_complete", fake.is_payment_complete)
+    monkeypatch.setattr(router_module, "payment_preimage", fake.payment_preimage)
     # no real backoff in tests - individual tests only care whether
     # _confirm_payment eventually succeeds or gives up, never how long
     monkeypatch.setattr(router_module, "_CONFIRMATION_RETRY_DELAYS_SECONDS", ())

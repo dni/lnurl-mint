@@ -19,7 +19,7 @@ a reference wallet implementation (hosted at
 | `GET /`         | one-pager frontend: mint QR code (LNURL of `/p`), lightning address, node info |
 | `GET /p`      | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement)      |
 | `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
-| `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb`      |
+| `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlp/{username}` | LUD-16 alias for `/p`, the mint is payable at `{USERNAME}@{BASE_URL host}` |
@@ -28,7 +28,7 @@ Callback semantics (`/w/cb`):
 
 | `k1`  | `pr` | `amount` | Result                                                    |
 |-------|------|----------|-----------------------------------------------------------|
-| one   | yes  | –        | melt: note reserved, OK returned immediately, `pr` (of exactly its value) paid asynchronously, burned once settled |
+| one   | yes  | –        | melt: note reserved, OK (plus `pr`/`verify` if verify is enabled) returned immediately, `pr` (of exactly its value) paid asynchronously, burned once settled |
 | one   | no   | no       | rotate: burned, a note keyed by `h` (of the same value) minted |
 | many  | no   | yes      | split: all burned, two notes minted - `amount` keyed by `h`, the remainder keyed by `h2` |
 | many  | no   | –        | merge: all burned, one note worth the sum minted, keyed by `h` |
@@ -119,6 +119,18 @@ verify as having closed that exposure window. `preimage` is fetched live from th
 funding source on every call, never cached locally, same as every other
 secret this mint handles. `/verify/{payment_hash}` itself always works when
 hit directly; `VERIFY_ENABLED` only controls whether `/p/cb` advertises it.
+
+The same flag extends a melt's own response the same way, per LUD-25: `pr`
+(the invoice this melt is paying, echoed back) and `verify` (a `/verify/`
+URL for it) are attached to `{"status": "OK"}` once the outgoing payment's
+`payment_hash` is known, letting a `WALLET` prove a melt actually happened
+without trusting this mint's word for it - a BOLT-11 `pr` commits to
+`payment_hash = sha256(preimage)`, so anyone holding both `pr` and the
+`preimage` `verify` eventually reports (fetched live, same as the mint
+side) can check that independently. Unlike a fresh mint's `preimage`, a
+melt's is never a bearer secret - the note(s) that funded it are already
+burned by the time it's returned - so there's no analogous rotate-immediately
+requirement here.
 
 **Tor**: set `ONION_URL` to this mint's hidden service address (e.g.
 `http://<v3-address>.onion`) to advertise it on the frontend one-pager as an

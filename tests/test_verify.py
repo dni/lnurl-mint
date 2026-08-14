@@ -1,11 +1,12 @@
 import sqlite3
 from hashlib import sha256
 
+import bolt11
 from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
 from lnurl_mint.db import NoteStore
-from tests.conftest import fresh_secret
+from tests.conftest import fake_invoice, fresh_secret
 
 
 def test_verify_url_absent_by_default(client: TestClient):
@@ -84,6 +85,73 @@ def test_verify_works_even_when_not_advertised(client: TestClient, node):
     assert "verify" not in data
     payment_hash = sha256(node.last_preimage).hexdigest()
     assert client.get(f"/verify/{payment_hash}").json()["settled"] is False
+
+
+def test_melt_response_carries_no_verify_by_default(client: TestClient, node, mint_note):
+    # verify_enabled is False in the test env (see conftest) - a melt's
+    # response must stay a bare {"status": "OK"}, same as before LUD-25's
+    # melt verify existed
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
+
+
+def test_melt_response_carries_pr_and_verify_url_when_enabled(client: TestClient, node, mint_note, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    payment_hash = bolt11.decode(pr).payment_hash
+    data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+    assert data["pr"] == pr
+    assert data["verify"] == f"http://testserver/verify/{payment_hash}"
+
+
+def test_melt_verify_reports_settled_and_a_matching_preimage_once_paid(
+    client: TestClient, node, mint_note, monkeypatch
+):
+    # the preimage handed back here is proof of the *outgoing* payment's own
+    # settlement, not a bearer secret - the note(s) that funded the melt are
+    # already burned by the time anyone could use it
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    node.payment_actually_completed = True  # the node's own view: this payment settled
+    data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+
+    payment_hash = bolt11.decode(pr).payment_hash
+    result = client.get(data["verify"]).json()
+    assert result["status"] == "OK"
+    assert result["settled"] is True
+    assert result["pr"] == pr
+    assert result["preimage"] == node.melt_preimages[payment_hash].hex()
+
+
+def test_melt_verify_reports_unsettled_before_the_payment_completes(client: TestClient, node, mint_note, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    # node.payment_actually_completed left False - is_payment_complete
+    # reports "not yet", never trusted as a bearer secret before settlement
+    data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+
+    result = client.get(data["verify"]).json()
+    assert result == {"status": "OK", "settled": False, "pr": pr}
+    assert "preimage" not in result
+
+
+def test_melt_verify_works_even_when_not_advertised(client: TestClient, node, mint_note):
+    # same convention as the mint side's verify_invoice: VERIFY_ENABLED only
+    # gates whether the callback response advertises the URL, not whether
+    # hitting it directly works
+    assert settings.verify_enabled is False
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    node.payment_actually_completed = True
+    data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+    assert "verify" not in data
+
+    payment_hash = bolt11.decode(pr).payment_hash
+    assert client.get(f"/verify/{payment_hash}").json()["settled"] is True
 
 
 def test_mints_table_migrates_from_before_lud21(tmp_path):

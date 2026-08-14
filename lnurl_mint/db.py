@@ -56,6 +56,11 @@ class NoteStore:
                 " amount_msat INTEGER NOT NULL,"
                 " minted INTEGER NOT NULL DEFAULT 0)"
             )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS melts ("
+                " payment_hash TEXT PRIMARY KEY,"
+                " pr TEXT NOT NULL)"  # the melted-into invoice, for LUD-25 melt verify
+            )
             # a database from before LUD-21 verify has a `mints` table
             # without `pr` - CREATE TABLE IF NOT EXISTS above is a no-op
             # against it, and this mint has no other migration mechanism,
@@ -172,6 +177,24 @@ class NoteStore:
                 # exc's own text (raw sqlite3 error) is never handed back on
                 # the wire - see log_internal_error
                 raise ValueError(log_internal_error("Note swap failed", exc)) from exc
+
+    def record_melt(self, payment_hash: str, pr: str) -> None:
+        """Record which invoice a melt is paying into, keyed by its
+        payment_hash - for LUD-25's melt verify (router.verify_invoice),
+        which needs `pr` back long after the note(s) that funded it are
+        burned and their own pending-melt bookkeeping (mark_pending/
+        finalize_melt) is gone. Written unconditionally, the same way a
+        mint invoice's `pr` is always stored regardless of VERIFY_ENABLED -
+        that setting only gates whether the callback response *advertises*
+        the verify URL, not whether hitting it directly works."""
+        with self._lock, self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO melts (payment_hash, pr) VALUES (?, ?)", (payment_hash, pr))
+
+    def melt_pr(self, payment_hash: str) -> str | None:
+        """The invoice a melt paid into (LUD-25 verify's `pr` field), or
+        None if this mint never recorded a melt for that payment_hash."""
+        row = self.conn.execute("SELECT pr FROM melts WHERE payment_hash = ?", (payment_hash,)).fetchone()
+        return row[0] if row else None
 
     def mark_pending(self, note_ids: list[str], payment_hash: str) -> None:
         """Reserve `note_ids` for an in-flight melt without burning them yet.

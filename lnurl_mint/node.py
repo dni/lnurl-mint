@@ -155,6 +155,26 @@ async def invoice_preimage(payment_hash: str, config: LightningBackendConfig) ->
     raise ValueError(f"invoice_preimage is not supported for backend {config.backend!r}.")
 
 
+async def payment_preimage(payment_hash: str, config: LightningBackendConfig) -> bytes | None:
+    """The preimage of an outgoing payment this mint sent (via pay_invoice),
+    if it has settled - fetched live, never cached, same as invoice_preimage
+    but for the other direction. Because a BOLT-11 `pr` commits to
+    payment_hash = sha256(preimage), this is a melt's own settlement proof:
+    LUD-25's melt verify (router._melt_preimage) hands it back alongside the
+    `pr` it paid so a third party can confirm the payment independently,
+    without trusting this mint's word for it - the same gap LUD-21 verify
+    closes for minting, mirrored for the melt side."""
+    if config.backend == "lnd":
+        if not config.url or not config.macaroon:
+            raise ValueError("Macaroon is required.")
+        return await _payment_preimage_lnd(payment_hash, config.url, config.macaroon.get_secret_value(), config)
+    if config.backend == "cln":
+        if not config.url or not config.rune:
+            raise ValueError("Rune is required.")
+        return await _payment_preimage_cln(payment_hash, config.url, config.rune.get_secret_value(), config)
+    raise ValueError(f"payment_preimage is not supported for backend {config.backend!r}.")
+
+
 async def sign_message(message: str, config: LightningBackendConfig) -> tuple[bytes, int]:
     """Signs `message` with this mint's own node identity key, via lnd's or
     cln's signmessage RPC - both follow the standard "Lightning Signed
@@ -519,6 +539,53 @@ async def _invoice_preimage_cln(payment_hash: str, url: str, rune: str, config: 
         return None
     preimage_hex = invoices[0].get("payment_preimage")
     return bytes.fromhex(preimage_hex) if preimage_hex else None
+
+
+async def _payment_preimage_lnd(
+    payment_hash: str, url: str, macaroon: str, config: LightningBackendConfig
+) -> bytes | None:
+    """lnd's REST TrackPaymentV2, the same stream _is_payment_complete_lnd
+    reads - a terminal SUCCEEDED event's own payment_preimage is exactly
+    this outgoing payment's settlement secret. A payment lnd never
+    attempted (404), or one that never reached SUCCEEDED, has none to
+    report."""
+    hash_b64 = quote(b64encode(bytes.fromhex(payment_hash)).decode(), safe="")
+    async with httpx.AsyncClient(verify=config.verify, timeout=10.0) as client:
+        async with client.stream(
+            "GET",
+            f"{url}/v2/router/track/{hash_b64}",
+            headers={"Grpc-Metadata-macaroon": macaroon},
+            params={"no_inflight_updates": "true"},
+        ) as res:
+            if res.status_code == 404:
+                return None
+            await _raise_for_status(res)
+            async for line in res.aiter_lines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                payment = event.get("result", event)
+                status = payment.get("status")
+                if status == "SUCCEEDED":
+                    preimage_hex = payment.get("payment_preimage")
+                    return _decode_hex_or_base64(preimage_hex) if preimage_hex else None
+                if status == "FAILED":
+                    return None
+    return None
+
+
+async def _payment_preimage_cln(payment_hash: str, url: str, rune: str, config: LightningBackendConfig) -> bytes | None:
+    """Core Lightning's clnrest plugin listpays - a complete pay's own
+    `preimage` is this outgoing payment's settlement secret."""
+    async with httpx.AsyncClient(verify=config.verify) as client:
+        res = await client.post(f"{url}/v1/listpays", headers={"Rune": rune}, json={"payment_hash": payment_hash})
+        await _raise_for_status(res)
+        pays = res.json().get("pays") or []
+    for pay in pays:
+        if pay.get("status") == "complete":
+            preimage_hex = pay.get("preimage")
+            return bytes.fromhex(preimage_hex) if preimage_hex else None
+    return None
 
 
 class NodeInfo(BaseModel):

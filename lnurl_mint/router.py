@@ -28,6 +28,7 @@ from .node import (
     is_invoice_settled,
     is_payment_complete,
     pay_invoice,
+    payment_preimage,
 )
 from .signing import mint_pubkey, sign_note
 
@@ -267,6 +268,40 @@ async def _mint_preimage(payment_hash: str) -> str | None:
     return preimage.hex() if preimage else None
 
 
+async def _melt_settled(payment_hash: str) -> bool:
+    """Whether a melt's outgoing payment (paying `payment_hash`) has
+    settled, for LUD-25's melt verify. Unlike _confirm_payment, which must
+    tell "confirmed not paid" apart from "can't tell yet" before a note is
+    ever restored or finalized, this is a read-only status check with no
+    note state to protect: still pending, a hodl HTLC held open, or a
+    momentary funding-source hiccup are all reported the same as "not
+    settled yet" rather than raised - a wrong answer here never burns or
+    restores anything, it only tells a third party to check back later."""
+    funding_source = settings.funding_source()
+    if not funding_source.backend:
+        return False
+    try:
+        return await is_payment_complete(payment_hash, funding_source)
+    except Exception:
+        return False
+
+
+async def _melt_preimage(payment_hash: str) -> str | None:
+    """Hex-encoded preimage of a settled outgoing payment, fetched live for
+    LUD-25 melt verify - mirrors _mint_preimage, but payment_preimage
+    (node.py) looks up a payment this mint *sent* rather than an invoice it
+    issued. None if there's no funding source to ask, or the lookup fails
+    for any reason - verify still reports `settled` correctly either way."""
+    funding_source = settings.funding_source()
+    if not funding_source.backend:
+        return None
+    try:
+        preimage = await payment_preimage(payment_hash, funding_source)
+    except Exception:
+        return None
+    return preimage.hex() if preimage else None
+
+
 async def _note_amount_by_id(note_id: str) -> int | None:
     """Value of the outstanding note with id `note_id`, or None - either it
     was never minted, or it has already been spent (rotated/split/merged/
@@ -397,28 +432,43 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
 
 @router.get("/verify/{payment_hash}", tags=["lnurlcash"])
 async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
-    """LUD-21: reports whether an invoice minted via /p/cb has settled -
-    looked up by payment_hash, unguessable but not itself secret, same as
-    any other LUD-21 verify. Works whenever hit directly, regardless of
-    VERIFY_ENABLED - that setting only controls whether /p/cb *advertises*
-    this URL, the same way LUD-21 implementations elsewhere in this
-    ecosystem treat their own verify toggle.
+    """LUD-21: reports whether an invoice this mint issued (via /p/cb) or
+    paid out (a melt, via /w/cb - LUD-25) has settled - looked up by
+    payment_hash, unguessable but not itself secret, same as any other
+    LUD-21 verify. Works whenever hit directly, regardless of
+    VERIFY_ENABLED - that setting only controls whether /p/cb and a melt's
+    own response *advertise* this URL, the same way LUD-21 implementations
+    elsewhere in this ecosystem treat their own verify toggle. mint_pr and
+    melt_pr are separate tables keyed by two different invoices' payment
+    hashes, so a lookup can never accidentally match the wrong direction.
 
-    `preimage`, once settled, IS the bearer note's spend secret (see
-    LUD-XX's Minting a bearer note from a payRequest) - deliberately
+    For a mint, `preimage`, once settled, IS the bearer note's spend secret
+    (see LUD-XX's Minting a bearer note from a payRequest) - deliberately
     returned anyway, fetched live from the funding source rather than
     cached (see _mint_preimage), because a wallet with no node of its own
     has no other way to learn it and claim the note. Per the spec's
     Security considerations, that wallet MUST then rotate the note
     immediately: `SERVICE`'s own node already is a permanent prior holder
     of this secret, and verify only makes confirming settlement
-    convenient, it does nothing to shrink that exposure window on its own."""
+    convenient, it does nothing to shrink that exposure window on its own.
+
+    For a melt, `preimage` is simply that outgoing payment's own settlement
+    proof (see _melt_preimage) - not a bearer secret at all, since the
+    note(s) that funded it are already burned by the time anyone could use
+    it. Because a BOLT-11 `pr` commits to payment_hash = sha256(preimage),
+    anyone holding both can independently confirm the melt without trusting
+    this mint's word for it, per LUD-25's melt verify."""
     pr = notes.mint_pr(payment_hash)
-    if pr is None:
-        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
-    settled = await _mint_settled(payment_hash)
-    preimage = await _mint_preimage(payment_hash) if settled else None
-    return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
+    if pr is not None:
+        settled = await _mint_settled(payment_hash)
+        preimage = await _mint_preimage(payment_hash) if settled else None
+        return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
+    pr = notes.melt_pr(payment_hash)
+    if pr is not None:
+        settled = await _melt_settled(payment_hash)
+        preimage = await _melt_preimage(payment_hash) if settled else None
+        return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
+    raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
 
 
 @router.get("/w", tags=["lnurlcash"])
@@ -463,6 +513,7 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
 
 @router.get("/w/cb", tags=["lnurlcash"])
 async def get_withdraw_callback(
+    req: Request,
     background_tasks: BackgroundTasks,
     k1: list[str] = Query(...),
     pr: str | None = None,
@@ -507,6 +558,13 @@ async def get_withdraw_callback(
     REQUIRED whenever `pr` is absent, and `h2` is additionally REQUIRED
     whenever `amount` is too (a split) - a missing or malformed one fails
     with reason "missing h" (or "missing h2").
+
+    A melt's response MAY carry its own LUD-21-style `verify` (LUD-25),
+    proving the payout happened without trusting this mint's word for it -
+    only when VERIFY_ENABLED, mirroring /p/cb's own verify toggle. `pr` is
+    echoed back alongside it so a holder of both can independently decode
+    `payment_hash` from `pr`, fetch `preimage` from `verify`, and compare -
+    see verify_invoice.
 
     If any k1 is invalid, the whole request fails and nothing is burned or
     minted (see NoteStore.swap's single transaction). While a k1 is
@@ -577,12 +635,25 @@ async def get_withdraw_callback(
             # _resolve_note itself uses, not an internal error
             raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
 
+        # LUD-25 melt verify: recorded unconditionally (see
+        # NoteStore.record_melt), same as a mint invoice's own `pr` - the
+        # verify endpoint itself always works when hit directly, regardless
+        # of VERIFY_ENABLED, which only gates whether it's advertised below
+        melt_verify_url = None
+        if decoded.has_payment_hash:
+            notes.record_melt(decoded.payment_hash, pr)
+            if settings.verify_enabled:
+                base = settings.public_base_url(str(req.base_url))
+                melt_verify_url = f"{base}/verify/{decoded.payment_hash}"
+
         # per LUD-03 step 6, SERVICE replies {"status": "OK"} here and only
         # then attempts the payment asynchronously - _melt_pay runs as a
         # background task after this response has already gone out, so it
         # has no way left to report a failure back to the wallet (see its
         # docstring)
         background_tasks.add_task(_melt_pay, note_ids, pr, decoded, funding_source)
+        if melt_verify_url is not None:
+            return WithdrawSuccessResponse(pr=pr, verify=melt_verify_url)
         return WithdrawSuccessResponse()
 
     try:

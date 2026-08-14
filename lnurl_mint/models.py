@@ -79,7 +79,14 @@ class LnurlWithdrawResponse(BaseModel):
 
 class WithdrawSuccessResponse(BaseModel):
     """LUD-03 success response, extended per lnurlcash. A melt (`pr` given)
-    carries nothing beyond `status` - no new note is minted.
+    mints no new note, so it carries nothing beyond `status` by default -
+    except `pr`/`verify` (LUD-25, only when VERIFY_ENABLED): `pr` echoes
+    back the invoice this melt is paying, and `verify` is a LUD-21-style
+    URL that reports that payment's own settlement, the same way LUD-21
+    extends a payRequest callback. Because a BOLT-11 `pr` commits to
+    payment_hash = sha256(preimage), the pair lets anyone - not just this
+    mint - independently confirm a melt actually happened once `verify`
+    reports settled, without trusting this mint's word for it.
 
     A rotate/split/merge (LUD-25) carries no secret at all: `WALLET`, not
     this mint, generates the replacement note's preimage and discloses
@@ -97,3 +104,5 @@ class WithdrawSuccessResponse(BaseModel):
     status: Literal["OK"] = "OK"
     sig: str | None = None
     sig2: str | None = None
+    pr: str | None = None
+    verify: str | None = None
