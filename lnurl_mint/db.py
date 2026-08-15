@@ -61,32 +61,38 @@ class NoteStore:
                 " payment_hash TEXT PRIMARY KEY,"
                 " pr TEXT NOT NULL)"  # the melted-into invoice, for LUD-25 melt verify
             )
-            # a database from before LUD-21 verify has a `mints` table
-            # without `pr` - CREATE TABLE IF NOT EXISTS above is a no-op
-            # against it, and this mint has no other migration mechanism,
-            # so add the column by hand rather than tell an operator to
-            # delete their database (which holds real outstanding notes,
-            # not just disposable dev state). Existing rows predate `pr`
-            # entirely, so they get an empty one - they're pending mint
-            # invoices, not notes, and short-lived by nature.
-            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(mints)")}
-            if "pr" not in columns:
-                self._conn.execute("ALTER TABLE mints ADD COLUMN pr TEXT NOT NULL DEFAULT ''")
-            # likewise, a database from before the async-melt pending lock
-            # has no `pending` column - existing rows predate it entirely,
-            # so nothing was ever mid-melt and 0 is the correct default.
-            note_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(notes)")}
-            if "pending" not in note_columns:
-                self._conn.execute("ALTER TABLE notes ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
-            # likewise, a database from before reconcile_pending_melts has no
-            # way to look a stranded pending note's invoice back up - existing
+            # add-a-column migrations for databases created before that
+            # column existed - this mint has no other migration mechanism,
+            # so the alternative would be telling an operator to delete
+            # their database (real outstanding notes, not just disposable
+            # dev state). See _add_column_if_missing.
+            #
+            # a database from before LUD-21 verify has no `pr` on `mints` -
+            # existing rows predate it entirely, so they get an empty one;
+            # they're pending mint invoices, not notes, and short-lived
+            self._add_column_if_missing(self._conn, "mints", "pr", "TEXT NOT NULL DEFAULT ''")
+            # a database from before the async-melt pending lock has no
+            # `pending` on `notes` - existing rows predate it entirely, so
+            # nothing was ever mid-melt and 0 is the correct default
+            self._add_column_if_missing(self._conn, "notes", "pending", "INTEGER NOT NULL DEFAULT 0")
+            # a database from before reconcile_pending_melts has no way to
+            # look a stranded pending note's invoice back up - existing
             # pending rows (if any) predate this column and are simply
             # invisible to pending_melts until the next mark_pending call
             # touches them, same as any other pre-migration NULL
-            if "pending_payment_hash" not in note_columns:
-                self._conn.execute("ALTER TABLE notes ADD COLUMN pending_payment_hash TEXT")
+            self._add_column_if_missing(self._conn, "notes", "pending_payment_hash", "TEXT")
             self._conn.commit()
         return self._conn
+
+    @staticmethod
+    def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl_suffix: str) -> None:
+        """`ALTER TABLE table ADD COLUMN column ddl_suffix`, unless `column`
+        is already there - table/column always come from literals in this
+        file, never external input. The only migration mechanism this mint
+        has; see the callers above for why each one exists."""
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_suffix}")
 
     def create_mint(self, payment_hash: str, pr: str, amount_msat: int) -> None:
         """Record an invoice whose preimage will become a bearer note worth
