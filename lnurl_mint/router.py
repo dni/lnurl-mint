@@ -4,6 +4,7 @@ import logging
 import re
 from hashlib import sha256
 from http import HTTPStatus
+from typing import Awaitable, Callable
 
 import bolt11
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
@@ -413,6 +414,21 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
     return LnurlPayActionResponse(pr=pr, verify=verify)
 
 
+async def _verify_response(
+    payment_hash: str,
+    pr: str,
+    is_settled: Callable[[str], Awaitable[bool]],
+    preimage_of: Callable[[str], Awaitable[str | None]],
+) -> LnurlPayVerifyResponse:
+    """The shared shape of a LUD-21 verify response: settled first, then
+    (only if settled) its preimage - `is_settled`/`preimage_of` are
+    _mint_settled/_mint_preimage or _melt_settled/_melt_preimage, whichever
+    direction `pr` came from (see verify_invoice, the only caller)."""
+    settled = await is_settled(payment_hash)
+    preimage = await preimage_of(payment_hash) if settled else None
+    return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
+
+
 @router.get("/verify/{payment_hash}", tags=["lnurlcash"])
 async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     """LUD-21: reports whether an invoice this mint issued (via /p/cb) or
@@ -443,14 +459,10 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     this mint's word for it, per LUD-25's melt verify."""
     pr = notes.mint_pr(payment_hash)
     if pr is not None:
-        settled = await _mint_settled(payment_hash)
-        preimage = await _mint_preimage(payment_hash) if settled else None
-        return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
+        return await _verify_response(payment_hash, pr, _mint_settled, _mint_preimage)
     pr = notes.melt_pr(payment_hash)
     if pr is not None:
-        settled = await _melt_settled(payment_hash)
-        preimage = await _melt_preimage(payment_hash) if settled else None
-        return LnurlPayVerifyResponse(settled=settled, preimage=preimage, pr=pr)
+        return await _verify_response(payment_hash, pr, _melt_settled, _melt_preimage)
     raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
 
 
