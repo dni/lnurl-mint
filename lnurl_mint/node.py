@@ -3,7 +3,7 @@ import ssl
 from base64 import b64decode, b64encode
 from hashlib import sha256
 from os import urandom
-from typing import Literal, NamedTuple
+from typing import Any, Awaitable, Callable, Literal, NamedTuple
 from urllib.parse import quote
 
 import bolt11
@@ -68,18 +68,40 @@ class LightningBackendConfig(BaseModel):
         return ssl.create_default_context(cafile=self.cert_path)
 
 
-async def create_invoice(
-    amount_msat: int, config: LightningBackendConfig, memo: str = "lnurlcash mint"
-) -> tuple[str, bytes]:
+async def _dispatch(
+    operation: str,
+    config: LightningBackendConfig,
+    lnd_fn: Callable[..., Awaitable[Any]],
+    cln_fn: Callable[..., Awaitable[Any]],
+    *leading: Any,
+    trailing: tuple = (),
+) -> Any:
+    """Runs `lnd_fn`/`cln_fn` (whichever `config.backend` selects) as
+    `fn(*leading, config.url, credential, config, *trailing)` - the
+    `(url, credential, config)` triple every `_xxx_lnd`/`_xxx_cln`
+    implementation below takes in that position, `credential` being
+    config's macaroon (lnd) or rune (cln). The credential check (and the
+    "which backend" branch itself) would otherwise be copy-pasted into
+    every public function in this module - `operation` is just that
+    function's own name, for an unsupported-backend error that still
+    points at the right one."""
     if config.backend == "lnd":
         if not config.url or not config.macaroon:
             raise ValueError("Macaroon is required.")
-        return await _create_invoice_lnd(amount_msat, config.url, config.macaroon.get_secret_value(), config, memo)
+        return await lnd_fn(*leading, config.url, config.macaroon.get_secret_value(), config, *trailing)
     if config.backend == "cln":
         if not config.url or not config.rune:
             raise ValueError("Rune is required.")
-        return await _create_invoice_cln(amount_msat, config.url, config.rune.get_secret_value(), config, memo)
-    raise ValueError(f"create_invoice is not supported for backend {config.backend!r}.")
+        return await cln_fn(*leading, config.url, config.rune.get_secret_value(), config, *trailing)
+    raise ValueError(f"{operation} is not supported for backend {config.backend!r}.")
+
+
+async def create_invoice(
+    amount_msat: int, config: LightningBackendConfig, memo: str = "lnurlcash mint"
+) -> tuple[str, bytes]:
+    return await _dispatch(
+        "create_invoice", config, _create_invoice_lnd, _create_invoice_cln, amount_msat, trailing=(memo,)
+    )
 
 
 class PaymentResult(NamedTuple):
@@ -97,15 +119,9 @@ async def pay_invoice(invoice: str, config: LightningBackendConfig, fee_limit_ms
     _melt_fee_limit_msat), not guessed at here; neither backend's own
     built-in default has any notion of what this mint charges to mint a
     note this size in the first place."""
-    if config.backend == "lnd":
-        if not config.url or not config.macaroon:
-            raise ValueError("Macaroon is required.")
-        return await _pay_invoice_lnd(invoice, config.url, config.macaroon.get_secret_value(), config, fee_limit_msat)
-    if config.backend == "cln":
-        if not config.url or not config.rune:
-            raise ValueError("Rune is required.")
-        return await _pay_invoice_cln(invoice, config.url, config.rune.get_secret_value(), config, fee_limit_msat)
-    raise ValueError(f"pay_invoice is not supported for backend {config.backend!r}.")
+    return await _dispatch(
+        "pay_invoice", config, _pay_invoice_lnd, _pay_invoice_cln, invoice, trailing=(fee_limit_msat,)
+    )
 
 
 async def is_payment_complete(payment_hash: str, config: LightningBackendConfig) -> bool:
@@ -126,15 +142,9 @@ async def is_payment_complete(payment_hash: str, config: LightningBackendConfig)
     not paid", and misreporting it as such is exactly what would let a
     holder recover and re-melt a note whose value is still claimable by
     someone else."""
-    if config.backend == "lnd":
-        if not config.url or not config.macaroon:
-            raise ValueError("Macaroon is required.")
-        return await _is_payment_complete_lnd(payment_hash, config.url, config.macaroon.get_secret_value(), config)
-    if config.backend == "cln":
-        if not config.url or not config.rune:
-            raise ValueError("Rune is required.")
-        return await _is_payment_complete_cln(payment_hash, config.url, config.rune.get_secret_value(), config)
-    raise ValueError(f"is_payment_complete is not supported for backend {config.backend!r}.")
+    return await _dispatch(
+        "is_payment_complete", config, _is_payment_complete_lnd, _is_payment_complete_cln, payment_hash
+    )
 
 
 async def invoice_preimage(payment_hash: str, config: LightningBackendConfig) -> bytes | None:
@@ -144,15 +154,7 @@ async def invoice_preimage(payment_hash: str, config: LightningBackendConfig) ->
     this preimage IS the bearer note's spend secret. Used by LUD-21 verify
     to hand it to a wallet with no node of its own, letting it claim and
     rotate the note immediately per the spec's Security considerations."""
-    if config.backend == "lnd":
-        if not config.url or not config.macaroon:
-            raise ValueError("Macaroon is required.")
-        return await _invoice_preimage_lnd(payment_hash, config.url, config.macaroon.get_secret_value(), config)
-    if config.backend == "cln":
-        if not config.url or not config.rune:
-            raise ValueError("Rune is required.")
-        return await _invoice_preimage_cln(payment_hash, config.url, config.rune.get_secret_value(), config)
-    raise ValueError(f"invoice_preimage is not supported for backend {config.backend!r}.")
+    return await _dispatch("invoice_preimage", config, _invoice_preimage_lnd, _invoice_preimage_cln, payment_hash)
 
 
 async def payment_preimage(payment_hash: str, config: LightningBackendConfig) -> bytes | None:
@@ -164,15 +166,7 @@ async def payment_preimage(payment_hash: str, config: LightningBackendConfig) ->
     `pr` it paid so a third party can confirm the payment independently,
     without trusting this mint's word for it - the same gap LUD-21 verify
     closes for minting, mirrored for the melt side."""
-    if config.backend == "lnd":
-        if not config.url or not config.macaroon:
-            raise ValueError("Macaroon is required.")
-        return await _payment_preimage_lnd(payment_hash, config.url, config.macaroon.get_secret_value(), config)
-    if config.backend == "cln":
-        if not config.url or not config.rune:
-            raise ValueError("Rune is required.")
-        return await _payment_preimage_cln(payment_hash, config.url, config.rune.get_secret_value(), config)
-    raise ValueError(f"payment_preimage is not supported for backend {config.backend!r}.")
+    return await _dispatch("payment_preimage", config, _payment_preimage_lnd, _payment_preimage_cln, payment_hash)
 
 
 async def sign_message(message: str, config: LightningBackendConfig) -> tuple[bytes, int]:
@@ -183,15 +177,7 @@ async def sign_message(message: str, config: LightningBackendConfig) -> tuple[by
     Zeus, ...) already use to prove node ownership. Neither backend exposes
     a way to sign an arbitrary raw digest instead - this wrapping is always
     applied. Returns (r || s, recovery_id)."""
-    if config.backend == "lnd":
-        if not config.url or not config.macaroon:
-            raise ValueError("Macaroon is required.")
-        return await _sign_message_lnd(message, config.url, config.macaroon.get_secret_value(), config)
-    if config.backend == "cln":
-        if not config.url or not config.rune:
-            raise ValueError("Rune is required.")
-        return await _sign_message_cln(message, config.url, config.rune.get_secret_value(), config)
-    raise ValueError(f"sign_message is not supported for backend {config.backend!r}.")
+    return await _dispatch("sign_message", config, _sign_message_lnd, _sign_message_cln, message)
 
 
 async def is_invoice_settled(payment_hash: str, config: LightningBackendConfig) -> bool:
@@ -199,15 +185,7 @@ async def is_invoice_settled(payment_hash: str, config: LightningBackendConfig) 
     the funding source directly - callers should remember a True result
     locally (see db.NoteStore.settle_mint) so a settled invoice doesn't
     need to be re-queried."""
-    if config.backend == "lnd":
-        if not config.url or not config.macaroon:
-            raise ValueError("Macaroon is required.")
-        return await _is_invoice_settled_lnd(payment_hash, config.url, config.macaroon.get_secret_value(), config)
-    if config.backend == "cln":
-        if not config.url or not config.rune:
-            raise ValueError("Rune is required.")
-        return await _is_invoice_settled_cln(payment_hash, config.url, config.rune.get_secret_value(), config)
-    raise ValueError(f"is_invoice_settled is not supported for backend {config.backend!r}.")
+    return await _dispatch("is_invoice_settled", config, _is_invoice_settled_lnd, _is_invoice_settled_cln, payment_hash)
 
 
 # --- lnd -----------------------------------------------------------------
@@ -601,15 +579,7 @@ class NodeInfo(BaseModel):
 async def fetch_node_info(config: LightningBackendConfig) -> NodeInfo:
     """A single getinfo against the funding source - both lnd and cln report
     identity, alias, and channel/peer counts in one call."""
-    if config.backend == "lnd":
-        if not config.url or not config.macaroon:
-            raise ValueError("Macaroon is required.")
-        return await _fetch_node_info_lnd(config.url, config.macaroon.get_secret_value(), config)
-    if config.backend == "cln":
-        if not config.url or not config.rune:
-            raise ValueError("Rune is required.")
-        return await _fetch_node_info_cln(config.url, config.rune.get_secret_value(), config)
-    raise ValueError(f"fetch_node_info is not supported for backend {config.backend!r}.")
+    return await _dispatch("fetch_node_info", config, _fetch_node_info_lnd, _fetch_node_info_cln)
 
 
 async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackendConfig) -> NodeInfo:
