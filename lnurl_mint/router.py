@@ -118,21 +118,6 @@ async def _melt_pay(
     PaymentFailed's own docstring). It's therefore handled the same as any
     other raise below: still confirmed independently before anything is
     restored, never treated as reason enough on its own."""
-    # notes stay merely "pending" (not yet burned) for the duration of the
-    # payment attempt - per the spec, SERVICE MUST NOT burn a melted k1
-    # until the outgoing payment actually settles. A failed payment leaves
-    # them for the caller to release back to outstanding. But "failed" must
-    # mean *confirmed* failed: pay_invoice can raise (or even report a
-    # clean PaymentFailed) after the funding source's own bookkeeping has
-    # moved on while the underlying HTLC is still live - e.g. deliberately,
-    # a hodl invoice held open by the payee - and treating that as a
-    # definite failure would let the caller retry with a *different*
-    # invoice while the original payment can still separately resolve,
-    # paying the same note's value out twice. So this only reports failure
-    # once the funding source itself confirms no HTLC remains outstanding
-    # - and only finalizes once it confirms the opposite. If it can't
-    # confirm either way, the notes are left pending rather than guessed
-    # at in either direction.
     # decoded.amount_msat is already validated equal to total_msat by the
     # caller (get_withdraw_callback) before this background task is even
     # scheduled - an amountless invoice would already have failed there
@@ -324,7 +309,7 @@ async def _resolve_note(k1: str) -> tuple[str, int] | None:
 
 
 def _mint_fee_msat(amount_msat: int) -> int:
-    """The fee withheld from a mint of `amount_msat` (LUD-XX's optional mint
+    """The fee withheld from a mint of `amount_msat` (LUD-25's optional mint
     fee): a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
     amount paid, rounded *up* to the nearest whole sat - Lightning fees are
     conventionally sat-denominated, and rounding up (rather than leaving a
@@ -443,7 +428,7 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     hashes, so a lookup can never accidentally match the wrong direction.
 
     For a mint, `preimage`, once settled, IS the bearer note's spend secret
-    (see LUD-XX's Minting a bearer note from a payRequest) - deliberately
+    (see LUD-25's Minting a bearer note from a payRequest) - deliberately
     returned anyway, fetched live from the funding source rather than
     cached (see _mint_preimage), because a wallet with no node of its own
     has no other way to learn it and claim the note. Per the spec's
@@ -486,7 +471,7 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
     (wallet-declared, unauthoritative) value as `?k1=...&amount=...` - it
     MUST be ignored here, never as a stand-in for the actual note value.
 
-    `mintPubkey` (LUD-XX Offline verification) is advertised here rather
+    `mintPubkey` (LUD-25 Offline verification) is advertised here rather
     than on the payRequest side: a wallet paying the mint invoice can
     already recover this mint's node id from the invoice's own signature,
     so a freshly minted note needs no separate field - only notes obtained
@@ -521,59 +506,30 @@ async def get_withdraw_callback(
     h: str | None = None,
     h2: str | None = None,
 ) -> WithdrawSuccessResponse:
-    """The lnurlcash callback - LUD-03 melt semantics, extended:
+    """The lnurlcash redeem callback - see 25.md's "Redeeming a bearer
+    note" table for the k1/pr/amount combinations (melt/rotate/split/merge)
+    this implements. `pr` MUST NOT be combined with multiple k1s or with
+    `amount` (merge or split first). `h`/`h2` are preimage hashes WALLET
+    generates for the replacement note(s) - required whenever `pr` is
+    absent, and `h2` additionally whenever `amount` is too - this mint
+    never generates one on WALLET's behalf.
 
-    - single k1 + pr: melt - the note is reserved (see NoteStore.
-      mark_pending) while `pr` (of exactly its value) gets paid. Per LUD-03
-      step 6, this replies {"status": "OK"} as soon as the request itself
-      is validated and the note reserved, then pays `pr` asynchronously in
-      the background (see _melt_pay) - burned for good once that payment
-      settles, released again if it definitively fails. `pr` MUST NOT be
-      combined with multiple k1s or with `amount` - merge (or split)
-      first. If `pr` is itself an invoice this same mint issued (see
-      create_mint), pending or already settled, the melt is rejected
-      outright (synchronously - no payment is ever attempted) rather than
-      paying it back to the mint's own node.
-    - one k1, no pr, no amount: rotate - burned and replaced by a note
-      keyed by `h`, of the same value.
-    - many k1 + amount, no pr: split - all burned; two new notes are
-      minted, one worth `amount` keyed by `h`, one worth the remainder
-      (minus base_fee_msat if this mint charges fees, per LUD-25) keyed by
-      `h2`. No min_mint_msat floor applies here - that's /p/cb's own dust
-      floor for a fresh mint, not a split of value the wallet already
-      holds - only that `change` can't go negative or land at exactly 0,
-      both "insufficient value" (the latter the same reason already used
-      when the fee alone couldn't be covered).
-    - many k1, no pr, no amount: merge - all burned, one note keyed by
-      `h` worth their sum minted, plus (n - 1) * base_fee_msat if this
-      mint charges fees - refunding every base fee already collected
-      beyond the single one an n-note merge should have cost.
-
-    `h`/`h2` (LUD-25): whenever `pr` is absent (rotate/split/merge), the
-    replacement note's secret is generated by `WALLET`, never this mint -
-    `WALLET` discloses only its sha256 hash, as `h` (and, for a split's
-    change note, `h2`). This mint registers the new note under that hash
-    directly and MUST NOT generate a secret on `WALLET`'s behalf: `h` is
-    REQUIRED whenever `pr` is absent, and `h2` is additionally REQUIRED
-    whenever `amount` is too (a split) - a missing or malformed one fails
-    with reason "missing h" (or "missing h2").
-
-    A melt's response MAY carry its own LUD-21-style `verify` (LUD-25),
-    proving the payout happened without trusting this mint's word for it -
-    only when VERIFY_ENABLED, mirroring /p/cb's own verify toggle. `pr` is
-    echoed back alongside it so a holder of both can independently decode
-    `payment_hash` from `pr`, fetch `preimage` from `verify`, and compare -
-    see verify_invoice.
-
-    If any k1 is invalid, the whole request fails and nothing is burned or
-    minted (see NoteStore.swap's single transaction). While a k1 is
-    reserved by an in-flight melt, every other callback naming it (another
-    melt, a rotate, a split, a merge) fails with reason "pending" instead
-    (see NoteStore.mark_pending). Every note minted here (never on melt,
-    which mints nothing) is signed per LUD-XX's Offline verification, by
-    the funding source node's own key, over the hash `WALLET` supplied -
-    see signing.sign_note; the fields are simply omitted if no funding
-    source is configured or signing fails for any other reason."""
+    Details the spec leaves to the implementation:
+    - min_mint_msat (/p/cb's dust floor for a *fresh* mint) does not apply
+      to a split's outputs - only that `change` can't go negative or land
+      at exactly 0.
+    - A melt reserves its note(s) (NoteStore.mark_pending) and replies
+      immediately per LUD-03 step 6; `_melt_pay` pays `pr` in the
+      background and only then burns or restores them (see its own
+      docstring). A `pr` naming an invoice this same mint issued via
+      /p/cb is rejected synchronously instead of being paid back to this
+      mint's own node.
+    - Every note minted here (never on melt) is signed per Offline
+      verification, over the hash WALLET supplied - omitted if no funding
+      source is configured or signing fails (see signing.sign_note).
+    - If any k1 is invalid the whole request fails atomically
+      (NoteStore.swap); a k1 already reserved by another in-flight melt
+      fails with reason "pending" instead (NoteStore.mark_pending)."""
     if len(k1) > settings.max_k1s:
         raise HTTPException(HTTPStatus.BAD_REQUEST, f"Too many k1s (max {settings.max_k1s}).")
 
@@ -582,11 +538,8 @@ async def get_withdraw_callback(
             HTTPStatus.BAD_REQUEST, "pr cannot be combined with multiple k1s or amount - merge or split first."
         )
 
-    # per LUD-25, WALLET (not this mint) generates every new note's secret
-    # for a rotate/split/merge and discloses only its hash - checked here,
-    # alongside the other structural request-shape checks above and
-    # before any note is even resolved, so this mint is never left
-    # holding the decision to generate one on WALLET's behalf instead.
+    # checked before any note is resolved, so an invalid/missing hash never
+    # burns anything
     if pr is None:
         if h is None or not HEX32_PATTERN.match(h):
             raise HTTPException(HTTPStatus.BAD_REQUEST, "missing h")
@@ -659,12 +612,6 @@ async def get_withdraw_callback(
         if amount is not None:
             if not 0 < amount < total_msat:
                 raise HTTPException(HTTPStatus.BAD_REQUEST, f"amount must be between 0 and {total_msat} msat.")
-            # min_mint_msat is /p/cb's own dust floor for a *fresh* mint,
-            # funded by a brand new invoice - it does not apply here: a
-            # split's notes come from value the wallet already holds, not a
-            # new payment this mint has to justify collecting, and LUD-25
-            # itself defines no minimum for either side of a split.
-            #
             # per LUD-25, base_fee_msat (never fee_percent_ppm - that's
             # already been withheld once, at mint time) comes out of
             # change, not the requested amount, so a holder can't dodge it

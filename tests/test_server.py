@@ -10,7 +10,7 @@ from lnurl_mint.server import app
 
 
 def test_startup_disables_the_uvicorn_access_logger():
-    # LUD-XX: a bearer note's k1 sits in the query string of /w and
+    # LUD-25: a bearer note's k1 sits in the query string of /w and
     # /w/cb for as long as it's held, so the default per-request
     # access log (which includes the full query string) would otherwise
     # write it to disk on every lookup or spend - see server.py's lifespan

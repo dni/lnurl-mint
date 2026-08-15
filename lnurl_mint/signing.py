@@ -5,7 +5,7 @@ from coincurve import PublicKey
 
 from .node import LightningBackendConfig, fetch_node_info, sign_message
 
-# LUD-XX Offline verification: signed via this mint's own funding-source
+# LUD-25 Offline verification: signed via this mint's own funding-source
 # node identity key (lnd's/cln's signmessage RPC - see node.sign_message),
 # which always wraps the message with this prefix and double-sha256s it
 # before signing - not a raw digest over a bespoke scheme, so any tool that
@@ -28,7 +28,7 @@ def _message(note_id_hex: str, amount_msat: int) -> str:
 
 
 async def mint_pubkey(config: LightningBackendConfig) -> str | None:
-    """This mint's offline-verification signing key (LUD-XX `mintPubkey`) -
+    """This mint's offline-verification signing key (LUD-25 `mintPubkey`) -
     the funding source node's own identity pubkey, the same one it signs
     BOLT-11 invoices with, so freshly minted and rotated notes verify
     against the same identity, exactly as the spec recommends. None if no
@@ -49,14 +49,14 @@ async def mint_pubkey(config: LightningBackendConfig) -> str | None:
 
 
 async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackendConfig) -> str | None:
-    """A recoverable signature over (note_id_hex, amount_msat) per LUD-XX's
+    """A recoverable signature over (note_id_hex, amount_msat) per LUD-25's
     Offline verification, signed by the funding source node's own
     signmessage RPC, as 65 bytes (r, then s, then recovery id),
     hex-encoded. `note_id_hex` is the note's own hash - per LUD-25, the
     `h`/`h2` a WALLET generated and disclosed for a rotate/split/merge, so
     this mint signs exactly what it was given, never a secret it derived
     itself. The signmessage RPC itself returns recovery-id-leading bytes;
-    per LUD-XX those are reordered here into r ‖ s ‖ recovery-id before
+    per LUD-25 those are reordered here into r ‖ s ‖ recovery-id before
     being handed out, matching raw BOLT11 signatures. None if signing
     isn't possible right now (no funding source, or it's unreachable) -
     never raises, since a rotate/split/merge must still succeed without

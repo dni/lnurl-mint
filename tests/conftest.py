@@ -104,7 +104,7 @@ class FakeNode:
         # duplicating its formula
         self.last_fee_limit_msat: int | None = None
         # a real keypair, standing in for the node's own identity key - lets
-        # tests of LUD-XX Offline verification (signing.mint_pubkey/
+        # tests of LUD-25 Offline verification (signing.mint_pubkey/
         # sign_note) exercise the real "Lightning Signed Message" signing
         # and recovery logic without a real lnd/cln node
         self.identity_key = PrivateKey()

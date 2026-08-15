@@ -1,7 +1,7 @@
 # lnurl-mint
 
-Minimal backend implementing **lnurlcash** ([LUD-XX](https://github.com/lnurl/luds/pull/301),
-open PR), Lightning bearer assets on top of plain [LUD-03](../luds/03.md)
+Minimal backend implementing **lnurlcash** ([LUD-25](../luds/25.md)),
+Lightning bearer assets on top of plain [LUD-03](../luds/03.md)
 `withdrawRequest` and [LUD-06](../luds/06.md) `payRequest`. A stripped-down
 sibling of [lnurl_server](../lnurl_server); nothing but the mint.
 
@@ -30,7 +30,7 @@ Callback semantics (`/w/cb`):
 |-------|------|----------|-----------------------------------------------------------|
 | one   | yes  | –        | melt: note reserved, OK (plus `pr`/`verify` if verify is enabled) returned immediately, `pr` (of exactly its value) paid asynchronously, burned once settled |
 | one   | no   | no       | rotate: burned, a note keyed by `h` (of the same value) minted |
-| many  | no   | yes      | split: all burned, two notes minted - `amount` keyed by `h`, the remainder keyed by `h2` |
+| one or many | no | yes | split: all burned, two notes minted - `amount` keyed by `h`, the remainder keyed by `h2` |
 | many  | no   | –        | merge: all burned, one note worth the sum minted, keyed by `h` |
 
 `pr` MUST NOT be combined with multiple `k1`s or with `amount`, melt several notes
@@ -110,11 +110,11 @@ swallowed rather than failing the rotate/split/merge itself.
 advertise a `verify` URL in `/p/cb`'s response, letting a wallet with no node
 of its own poll `/verify/{payment_hash}` for settlement status instead of
 watching the invoice itself. Once settled, the response's `preimage` *is* the
-freshly minted bearer note's spend secret (see [LUD-XX](https://github.com/lnurl/luds/pull/301)) -
+freshly minted bearer note's spend secret (see [LUD-25](../luds/25.md)) -
 unlike a plain LUD-21 proof-of-payment, that wallet needs it to claim the note
 at all, so it must be handed over despite `SERVICE`'s own node already being a
 permanent prior holder of that same secret; the wallet MUST rotate the note
-immediately after (see LUD-XX's Security considerations) rather than treat
+immediately after (see LUD-25's Security considerations) rather than treat
 verify as having closed that exposure window. `preimage` is fetched live from the
 funding source on every call, never cached locally, same as every other
 secret this mint handles. `/verify/{payment_hash}` itself always works when
@@ -183,7 +183,7 @@ Set `FUNDINGSOURCE_MACAROON` to the hex-encoded contents of that file
 (`xxd -p -c1000 lnurl-mint.macaroon`, or drop `--save_to` to have `lncli`
 print the hex directly instead of writing a file). `message:write` is the
 one easy to leave out and the one that breaks quietly: without it,
-`SignMessage` calls fail, and since offline verification (LUD-XX) is
+`SignMessage` calls fail, and since offline verification (LUD-25) is
 optional and never blocks a rotate/split/merge on failure (see
 `signing.sign_note`), a scoped-too-narrow macaroon shows up as every note
 silently missing its signature rather than an obvious error - check the

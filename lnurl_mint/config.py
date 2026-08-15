@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # this mint's own funding source, configured once by the operator - used
     # to create the invoices that mint bearer notes and to pay the invoices
-    # that melt them, and to sign notes for LUD-XX's optional Offline
+    # that melt them, and to sign notes for LUD-25's optional Offline
     # verification via the node's own signmessage RPC (see signing.py) -
     # there's no separate setting for that, it's simply unavailable without
     # a funding source. Only the credential for the chosen backend is
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     min_sendable_msat: int = 10_000
     max_sendable_msat: int = 1_000_000_000
 
-    # LUD-XX's optional mint fee: withheld from every minted note's value
+    # LUD-25's optional mint fee: withheld from every minted note's value
     # (a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
     # amount paid), meant to cover the routing cost of eventually paying
     # the note back out on melt. Advertised in /p/cb's payRequest metadata

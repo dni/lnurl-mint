@@ -1,7 +1,7 @@
 [project]
 name = "lnurl-mint"
 dynamic = ["version"]
-description = "Minimal lnurlcash (LUD-XX, Lightning bearer assets) backend."
+description = "Minimal lnurlcash (LUD-25, Lightning bearer assets) backend."
 authors = [{ name = "dni", email = "dni@lnbits.com" }]
 license = "MIT"
 readme = "README.md"

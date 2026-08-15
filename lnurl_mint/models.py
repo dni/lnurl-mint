@@ -42,7 +42,7 @@ class LnurlPayVerifyResponse(BaseModel):
     """LUD-21: settlement status for an invoice minted via `/p/cb`.
 
     `preimage`, once settled, IS the freshly minted bearer note's spend
-    secret (see LUD-XX's Minting a bearer note from a payRequest) - unlike
+    secret (see LUD-25's Minting a bearer note from a payRequest) - unlike
     a plain LUD-21 proof-of-payment, a wallet with no node of its own needs
     it to claim and immediately rotate the note: this mint's own node is a
     permanent prior holder of a freshly minted note's secret (it generated
@@ -64,7 +64,7 @@ class LnurlWithdrawResponse(BaseModel):
     equals the note's value, which is how a wallet reads a note's worth
     (this GET is informational and never burns anything).
 
-    `mintPubkey` (LUD-XX Offline verification, optional) is this mint's
+    `mintPubkey` (LUD-25 Offline verification, optional) is this mint's
     signing key - omitted entirely if no funding source is configured
     (see signing.mint_pubkey)."""
 
@@ -78,28 +78,14 @@ class LnurlWithdrawResponse(BaseModel):
 
 
 class WithdrawSuccessResponse(BaseModel):
-    """LUD-03 success response, extended per lnurlcash. A melt (`pr` given)
-    mints no new note, so it carries nothing beyond `status` by default -
-    except `pr`/`verify` (LUD-25, only when VERIFY_ENABLED): `pr` echoes
-    back the invoice this melt is paying, and `verify` is a LUD-21-style
-    URL that reports that payment's own settlement, the same way LUD-21
-    extends a payRequest callback. Because a BOLT-11 `pr` commits to
-    payment_hash = sha256(preimage), the pair lets anyone - not just this
-    mint - independently confirm a melt actually happened once `verify`
-    reports settled, without trusting this mint's word for it.
-
-    A rotate/split/merge (LUD-25) carries no secret at all: `WALLET`, not
-    this mint, generates the replacement note's preimage and discloses
-    only its hash (`h`, and `h2` for a split's change note) on the
-    callback request - this mint registers the note under that hash
-    directly and has nothing further to hand back. `sig`/`sig2` (LUD-XX
-    Offline verification, optional) are this mint's recoverable
-    signatures over `h`/`h2` respectively, letting `WALLET` obtain a
-    verifiable note without its secret ever having existed anywhere but
-    `WALLET` itself - omitted whenever there's no corresponding hash
-    (melt, or a plain rotate/merge never supplies `h2`), and omitted
-    entirely if no funding source is configured (see signing.sign_note).
-    None fields are excluded on the wire."""
+    """LUD-03 success response, extended per LUD-25 (see
+    router.get_withdraw_callback for the full melt/rotate/split/merge
+    semantics). `pr`/`verify` echo a melt's invoice and its LUD-21-style
+    settlement-proof URL, present only when VERIFY_ENABLED. `sig`/`sig2`
+    are this mint's Offline-verification signatures over a rotate/split/
+    merge's `h`/`h2` (see signing.sign_note) - `sig2` only for a split,
+    both omitted if no funding source is configured. None fields are
+    excluded on the wire."""
 
     status: Literal["OK"] = "OK"
     sig: str | None = None

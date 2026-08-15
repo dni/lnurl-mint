@@ -71,7 +71,7 @@ async def _monitor_funding_source(funding_source: LightningBackendConfig, health
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    # LUD-XX: a bearer note's k1 lives in the query string of /w and
+    # LUD-25: a bearer note's k1 lives in the query string of /w and
     # /w/cb for as long as the note is held - unlike an ephemeral
     # LUD-03 k1, that can be a long time, turning access logs into a
     # durable theft vector (see the spec's "Secrets in GET query strings").
@@ -90,7 +90,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     logging.getLogger("uvicorn.access").disabled = True
 
     # a misconfigured or unreachable funding source degrades every
-    # funding-source-backed feature (minting, melting, LUD-XX offline
+    # funding-source-backed feature (minting, melting, LUD-25 offline
     # verification) silently and per-request rather than failing outright
     # (see signing.mint_pubkey/sign_note, router._funding_source) - that's
     # the right behavior for a request, but an operator should still find
@@ -142,7 +142,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="lnurl-mint",
-    description="Minimal lnurlcash (LUD-XX, Lightning bearer assets) mint - LUD-03/LUD-06 only.",
+    description="Minimal lnurlcash (LUD-25, Lightning bearer assets) mint - LUD-03/LUD-06 only.",
     lifespan=lifespan,
 )
 
