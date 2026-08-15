@@ -1,4 +1,5 @@
 import html
+import re
 from string import Template
 from urllib.parse import urlparse
 
@@ -28,12 +29,26 @@ def _qr_svg(data: str) -> str:
     return image.to_string(encoding="unicode")
 
 
+_HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def _contrast_text_color(hex_color: str) -> str:
+    """A readable text color (near-black or near-white, matching the page's
+    own dark/light text shades) for text placed on top of `hex_color` -
+    plain YIQ brightness, good enough for a swatch nobody's staring at for
+    accessibility compliance."""
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+    brightness = (r * 299 + g * 587 + b * 114) / 1000
+    return "#14161c" if brightness > 140 else "#f5f4f0"
+
+
 PAGE = Template(
     """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+$theme_color_meta
 <title>$title</title>
 <style>
   :root { color-scheme: dark; }
@@ -68,6 +83,20 @@ PAGE = Template(
   td { padding: .35rem 0; border-top: 1px solid #2c303b; text-align: left; }
   td:first-child { color: #9a978f; white-space: nowrap; padding-right: 1rem; }
   td.mono { font-family: ui-monospace, monospace; word-break: break-all; }
+  td.value-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+  td.value-row span { word-break: break-all; }
+  .copy-sm {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 1.6rem; height: 1.6rem; padding: 0;
+    background: #1d2028; color: #e6e4dd; border: 1px solid #2c303b; border-radius: 6px;
+    font-size: .8rem; line-height: 1; cursor: pointer;
+  }
+  .copy-sm:hover { border-color: #4a5060; }
+  .copy-sm.copied { border-color: #7a9a65; }
+  .color-swatch {
+    display: inline-block; padding: .15rem .5rem; border-radius: 6px;
+    font-family: ui-monospace, monospace; font-size: .8rem;
+  }
   .muted { color: #9a978f; font-size: .85rem; }
   footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #2c303b;
            font-size: .8rem; color: #9a978f; }
@@ -99,7 +128,7 @@ PAGE = Template(
   </footer>
 </main>
 <script>
-  for (const el of document.querySelectorAll(".copy")) {
+  for (const el of document.querySelectorAll(".copy, .copy-sm")) {
     el.addEventListener("click", async () => {
       await navigator.clipboard.writeText(el.dataset.copy);
       el.classList.add("copied");
@@ -122,11 +151,19 @@ TOR_SECTION = Template(
 NODE_SECTION = Template(
     """<table>
     <tr><td>Alias</td><td class="mono">$alias</td></tr>
-    <tr><td>URI</td><td class="mono">$uri</td></tr>
+    $color_row
+    <tr><td>Public key</td><td class="mono value-row"><span>$pubkey</span>$pubkey_copy</td></tr>
+    <tr><td>Connect string</td><td class="mono value-row"><span>$connect_string</span>$connect_copy</td></tr>
     <tr><td>Channels</td><td class="mono">$num_channels</td></tr>
     <tr><td>Peers</td><td class="mono">$num_peers</td></tr>
   </table>"""
 )
+
+COLOR_ROW = Template(
+    """<tr><td>Color</td><td><span class="color-swatch" style="background:$color;color:$text_color">$color</span></td></tr>"""
+)
+
+COPY_SM = Template("""<button class="copy-sm" data-copy="$value" title="$title">&#10697;</button>""")
 
 
 def _tor_section(base: str) -> str:
@@ -148,20 +185,42 @@ def _tor_section(base: str) -> str:
     )
 
 
-async def _node_section() -> str:
+def _copy_button(value: str | None, title: str) -> str:
+    if not value:
+        return ""
+    return COPY_SM.substitute(value=html.escape(value), title=title)
+
+
+async def _node_section() -> tuple[str, str | None]:
+    """Returns the Node table's HTML, plus its validated `#rrggbb` color (if
+    any) - the latter reused by index() for the page's <head> theme-color
+    meta tag, so a wallet/browser chrome matching this mint's node color
+    doesn't require a second round-trip to the funding source."""
     funding_source = settings.funding_source()
     if not funding_source.backend:
-        return '<p class="muted">No funding source configured.</p>'
+        return '<p class="muted">No funding source configured.</p>', None
     try:
         node = await fetch_node_info(funding_source)
     except Exception:
-        return '<p class="muted">Funding source node is unreachable.</p>'
-    return NODE_SECTION.substitute(
+        return '<p class="muted">Funding source node is unreachable.</p>', None
+    # node.uri is "pubkey@host:port" once the node has an announced address,
+    # or just the bare pubkey otherwise (see node._fetch_node_info_lnd/cln) -
+    # split so the pubkey and the full connect string each get their own row.
+    pubkey, _, host = (node.uri or "").partition("@")
+    connect_string = node.uri if host else None
+    color = node.color if node.color and _HEX_COLOR_RE.fullmatch(node.color) else None
+    color_row = COLOR_ROW.substitute(color=color, text_color=_contrast_text_color(color)) if color else ""
+    section = NODE_SECTION.substitute(
         alias=html.escape(node.alias or "-"),
-        uri=html.escape(node.uri or "-"),
+        color_row=color_row,
+        pubkey=html.escape(pubkey or "-"),
+        pubkey_copy=_copy_button(pubkey, "Copy public key"),
+        connect_string=html.escape(connect_string or "-"),
+        connect_copy=_copy_button(connect_string, "Copy connect string"),
         num_channels=node.num_channels,
         num_peers=node.num_peers,
     )
+    return section, color
 
 
 @frontend_router.get("/", include_in_schema=False)
@@ -171,6 +230,8 @@ async def index(req: Request) -> HTMLResponse:
     base, host = settings.public_base_url_and_host(str(req.base_url))
     lnurl = lnurl_encode(f"{base}/p")
     address = f"{settings.username}@{host}"
+    node_section, color = await _node_section()
+    theme_color_meta = f'<meta name="theme-color" content="{color}">' if color else ""
     page = PAGE.substitute(
         title=html.escape(settings.title),
         description=html.escape(settings.description),
@@ -178,7 +239,8 @@ async def index(req: Request) -> HTMLResponse:
         lnurl=lnurl,
         address=html.escape(address),
         tor_section=_tor_section(base),
-        node_section=await _node_section(),
+        theme_color_meta=theme_color_meta,
+        node_section=node_section,
         version=html.escape(__version__),
     )
     return HTMLResponse(page)

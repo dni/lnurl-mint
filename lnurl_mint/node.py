@@ -572,8 +572,16 @@ class NodeInfo(BaseModel):
 
     alias: str | None = None
     uri: str | None = None  # node_key@host:port, or the bare pubkey if unannounced
+    color: str | None = None  # "#rrggbb", the node's self-reported display color
     num_channels: int = 0
     num_peers: int = 0
+
+
+def _normalize_color(color: str | None) -> str | None:
+    """lnd's getinfo already prefixes its `color` with '#'; cln's doesn't -
+    normalized to a single "#rrggbb" form so the frontend can use it
+    directly as a CSS color without caring which backend it came from."""
+    return f"#{color.lstrip('#')}" if color else None
 
 
 async def fetch_node_info(config: LightningBackendConfig) -> NodeInfo:
@@ -593,6 +601,7 @@ async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackend
     return NodeInfo(
         alias=info.get("alias") or None,
         uri=uris[0] if uris else info.get("identity_pubkey"),
+        color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),
     )
@@ -612,6 +621,7 @@ async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConf
     return NodeInfo(
         alias=info.get("alias") or None,
         uri=uri,
+        color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),
     )
