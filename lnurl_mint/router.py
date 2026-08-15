@@ -4,7 +4,6 @@ import logging
 import re
 from hashlib import sha256
 from http import HTTPStatus
-from urllib.parse import urlparse
 
 import bolt11
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
@@ -336,8 +335,7 @@ def _melt_fee_limit_msat(amount_msat: int) -> int:
 
 
 def _pay_response(req: Request) -> LnurlPayResponse:
-    base = settings.public_base_url(str(req.base_url))
-    host = urlparse(base).hostname or req.url.hostname
+    base, host = settings.public_base_url_and_host(str(req.base_url))
     metadata_entries = [
         ["text/plain", f"Mint an lnurlcash bearer note on {host}"],
         ["text/identifier", f"{settings.username}@{host}"],
@@ -484,8 +482,7 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy) - same as
     # _pay_response/get_pay_callback
-    base = settings.public_base_url(str(req.base_url))
-    host = urlparse(base).hostname or req.url.hostname
+    base, host = settings.public_base_url_and_host(str(req.base_url))
     return LnurlWithdrawResponse(
         callback=f"{base}/w/cb",
         k1=k1,

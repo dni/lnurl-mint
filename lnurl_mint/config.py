@@ -2,7 +2,7 @@ import os
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .node import LightningBackendConfig
@@ -103,6 +103,26 @@ class Settings(BaseSettings):
     # LUD-16: the mint is payable at {username}@{base_url host}
     username: str = "mint"
 
+    # every route that needs to embed this mint's own hostname somewhere
+    # (defaultDescription, the lightning address, ...) must derive it from
+    # base_url/onion_url, never a request's own Host header - same reason
+    # base_url itself is required rather than request-derived. Validated
+    # once here, at startup, rather than falling back to something
+    # request-derived per call site if parsing ever failed.
+    @field_validator("base_url")
+    @classmethod
+    def _base_url_needs_a_hostname(cls, value: str) -> str:
+        if not urlparse(value).hostname:
+            raise ValueError(f"BASE_URL {value!r} has no hostname.")
+        return value
+
+    @field_validator("onion_url")
+    @classmethod
+    def _onion_url_needs_a_hostname(cls, value: str | None) -> str | None:
+        if value is not None and not urlparse(value).hostname:
+            raise ValueError(f"ONION_URL {value!r} has no hostname.")
+        return value
+
     def public_base_url(self, request_base_url: str) -> str:
         if self.onion_url:
             request_host = urlparse(request_base_url).hostname or ""
@@ -110,6 +130,15 @@ class Settings(BaseSettings):
             if request_host and request_host == onion_host:
                 return self.onion_url.rstrip("/")
         return self.base_url.rstrip("/")
+
+    def public_base_url_and_host(self, request_base_url: str) -> tuple[str, str]:
+        """(public_base_url(...), its hostname) - for the routes that need
+        both. The hostname is guaranteed present: base_url/onion_url are
+        validated above to have one."""
+        base = self.public_base_url(request_base_url)
+        host = urlparse(base).hostname
+        assert host is not None
+        return base, host
 
     def funding_source(self) -> LightningBackendConfig:
         return LightningBackendConfig(

@@ -168,8 +168,7 @@ async def _node_section() -> str:
 async def index(req: Request) -> HTMLResponse:
     """The one-pager: the mint's LNURL QR code (scan and pay to mint a
     bearer note), its lightning address, and the funding-source node info."""
-    base = settings.public_base_url(str(req.base_url))
-    host = urlparse(base).hostname or req.url.hostname or "localhost"
+    base, host = settings.public_base_url_and_host(str(req.base_url))
     lnurl = lnurl_encode(f"{base}/p")
     address = f"{settings.username}@{host}"
     page = PAGE.substitute(
