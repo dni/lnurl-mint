@@ -166,7 +166,9 @@ NODE_SECTION = Template(
 )
 
 COLOR_ROW = Template(
-    """<tr><td>Color</td><td><span class="color-swatch" style="background:$color;color:$text_color">$color</span></td></tr>"""
+    """<tr><td>Color</td><td>"""
+    """<span class="color-swatch" style="background:$color;color:$text_color">$color</span>"""
+    """</td></tr>"""
 )
 
 COPY_SM = Template("""<button class="copy-sm" data-copy="$value" title="$title">&#10697;</button>""")
