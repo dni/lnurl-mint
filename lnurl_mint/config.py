@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # wallet with no node of its own can poll whether its invoice settled.
     # Off by default - see router.verify_invoice for why this mint never
     # returns the spec's `preimage` field regardless of this setting.
-    verify_enabled: bool = False
+    verify_enabled: bool = True
 
     # the one-pager frontend (GET /)
     title: str = "lnurl-mint"
