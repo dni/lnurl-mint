@@ -320,6 +320,21 @@ def _mint_fee_msat(amount_msat: int) -> int:
     return -(-fee_msat // 1000) * 1000
 
 
+def _min_sendable_msat() -> int:
+    """The fee-inclusive floor to actually advertise as `minSendable` - a
+    wallet paying settings.min_sendable_msat gross gets net_amount_msat =
+    amount - _mint_fee_msat(amount) credited (see get_pay_callback), which
+    /p/cb then also holds to settings.min_mint_msat. Advertising the raw
+    settings.min_sendable_msat when it doesn't clear that net floor means
+    paying the advertised minimum always bounces, so this walks amount up
+    from the higher of the two configured floors until its net clears
+    min_mint_msat too."""
+    amount_msat = max(settings.min_sendable_msat, settings.min_mint_msat)
+    while amount_msat - _mint_fee_msat(amount_msat) < settings.min_mint_msat:
+        amount_msat += 1000
+    return amount_msat
+
+
 def _melt_fee_limit_msat(amount_msat: int) -> int:
     """The routing-fee budget for melting a note worth `amount_msat` - per
     LUD-25, the mint fee withheld at mint time "is meant to cover whatever
@@ -348,7 +363,7 @@ def _pay_response(req: Request) -> LnurlPayResponse:
     metadata = json.dumps(metadata_entries)
     return LnurlPayResponse(
         callback=f"{base}/p/cb",
-        minSendable=settings.min_sendable_msat,
+        minSendable=_min_sendable_msat(),
         maxSendable=settings.max_sendable_msat,
         metadata=metadata,
         withdrawLink=f"{base}/w",

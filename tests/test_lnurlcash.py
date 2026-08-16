@@ -68,6 +68,25 @@ def test_pay_response_advertises_mint_fee_when_configured(client: TestClient, mo
     assert ["text/plain", "Mint fees: 1000,2000"] in json.loads(metadata)
 
 
+def test_pay_response_advertises_fee_inclusive_min_sendable(client: TestClient, node: FakeNode, monkeypatch):
+    # regression: minSendable used to be settings.min_sendable_msat as-is,
+    # gross - but _mint_fee_msat is withheld before /p/cb's min_mint_msat
+    # check, so paying that advertised minimum bounced whenever the fee ate
+    # into it. minSendable must be raised enough that paying exactly that
+    # amount nets at least min_mint_msat.
+    monkeypatch.setattr(settings, "base_fee_msat", 1000)
+    monkeypatch.setattr(settings, "min_mint_msat", 10_000)
+    monkeypatch.setattr(settings, "min_sendable_msat", 10_000)
+
+    min_sendable = client.get("/p").json()["minSendable"]
+    assert min_sendable == 11000  # 10000 (min_mint_msat) + 1000 (fee)
+
+    response = client.get(f"/p/cb?amount={min_sendable}")
+    assert response.json()["pr"]
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+    assert note_value(client, node.last_preimage.hex()) == 10000
+
+
 def test_mint_credits_note_net_of_configured_fee(client: TestClient, node: FakeNode, monkeypatch):
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     monkeypatch.setattr(settings, "fee_percent_ppm", 2000)  # 0.2%
