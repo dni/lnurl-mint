@@ -1,5 +1,6 @@
 import html
 import re
+from pathlib import Path
 from string import Template
 from urllib.parse import urlparse
 
@@ -7,13 +8,17 @@ import qrcode
 import qrcode.image.svg
 from bech32 import bech32_encode, convertbits
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from . import __version__
 from .config import settings
 from .node import fetch_node_info
 
 frontend_router = APIRouter()
+
+# Served locally at /favicon.svg rather than linked from lnurl-wallet's
+# GitHub Pages, so the page has no third-party asset dependency.
+FAVICON_PATH = Path(__file__).parent / "static" / "favicon.svg"
 
 
 def lnurl_encode(url: str) -> str:
@@ -48,6 +53,7 @@ PAGE = Template(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 $theme_color_meta
 <title>$title</title>
 <style>
@@ -221,6 +227,11 @@ async def _node_section() -> tuple[str, str | None]:
         num_peers=node.num_peers,
     )
     return section, color
+
+
+@frontend_router.get("/favicon.svg", include_in_schema=False)
+async def favicon() -> FileResponse:
+    return FileResponse(FAVICON_PATH, media_type="image/svg+xml")
 
 
 @frontend_router.get("/", include_in_schema=False)
