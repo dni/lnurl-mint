@@ -150,6 +150,15 @@ class NoteStore:
         row = self.conn.execute("SELECT amount_msat FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
         return row[0] if row else None
 
+    def note_spent(self, note_id: str) -> bool:
+        """Whether `note_id` names a note this mint actually issued and has
+        since burned - as opposed to one that never existed at all. Burned
+        rows are kept (see the class docstring), so this is exactly what
+        distinguishes "already spent" from "unknown" for callers that want
+        to report which."""
+        row = self.conn.execute("SELECT spent FROM notes WHERE id = ?", (note_id,)).fetchone()
+        return bool(row and row[0])
+
     def swap(self, burn_ids: list[str], mint_note_ids: list[str], mint_amounts: list[int]) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,

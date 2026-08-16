@@ -647,6 +647,21 @@ def test_withdraw_requires_k1(client: TestClient):
     assert client.get("/w").json()["status"] == "ERROR"
 
 
+def test_withdraw_reports_unknown_k1_distinctly_from_spent(client: TestClient, mint_note):
+    # a k1 this mint never issued at all gets a different reason than one
+    # it issued and has since burned - both fail the same GET /w lookup,
+    # but only the store can tell them apart (see NoteStore.note_spent)
+    bogus, _ = fresh_secret()
+    unknown = client.get(f"/w?k1={bogus}").json()
+    assert unknown == {"status": "ERROR", "reason": "Unknown note."}
+
+    k1 = mint_note(5000)
+    _, h = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
+    spent = client.get(f"/w?k1={k1}").json()
+    assert spent == {"status": "ERROR", "reason": "Note already spent."}
+
+
 def test_withdraw_ignores_the_declared_amount(client: TestClient, mint_note):
     # a note's URL may carry a wallet-declared &amount=, which the
     # informational endpoint MUST ignore - maxWithdrawable stays authoritative

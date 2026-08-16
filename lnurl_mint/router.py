@@ -504,7 +504,9 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
     invoice) do."""
     resolved = await _resolve_note(k1)
     if resolved is None:
-        raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown or already spent note.")
+        if HEX32_PATTERN.match(k1) and notes.note_spent(_note_id(k1)):
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
     _, amount_msat = resolved
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy) - same as
