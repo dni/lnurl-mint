@@ -27,6 +27,12 @@ os.environ["MIN_MINT_MSAT"] = "0"
 # its old default so the same small test amounts stay above it; the bound
 # itself is exercised by tests that monkeypatch settings.min_sendable_msat
 os.environ["MIN_SENDABLE_MSAT"] = "1000"
+# verify_enabled defaults to True (see config.py) - pinned off here so
+# responses stay their pre-LUD-21 shape (bare {"status": "OK"}, no "verify"
+# field) for the many assertions elsewhere that don't care about verify;
+# the enabled behavior itself is exercised by tests that monkeypatch
+# settings.verify_enabled directly
+os.environ["VERIFY_ENABLED"] = "false"
 
 import asyncio
 import time
