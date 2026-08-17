@@ -162,7 +162,14 @@ class FakeNode:
         return self.melt_preimages.get(payment_hash)
 
     async def fetch_node_info(self, config) -> NodeInfo:
-        return NodeInfo(alias="fakenode", uri=f"{self.pubkey}@127.0.0.1:9735", num_channels=3, num_peers=5)
+        return NodeInfo(
+            alias="fakenode",
+            uri=f"{self.pubkey}@127.0.0.1:9735",
+            color="#3399ff",
+            num_channels=3,
+            num_peers=5,
+            capacity_msat=750_000_000,
+        )
 
     async def sign_message(self, message: str, config) -> tuple[bytes, int]:
         # mirrors lnd's/cln's real signmessage: sign(sha256(sha256(b"Lightning
@@ -182,6 +189,7 @@ def node(monkeypatch: pytest.MonkeyPatch) -> FakeNode:
     monkeypatch.setattr(router_module, "pay_invoice", fake.pay_invoice)
     monkeypatch.setattr(router_module, "is_payment_complete", fake.is_payment_complete)
     monkeypatch.setattr(router_module, "payment_preimage", fake.payment_preimage)
+    monkeypatch.setattr(router_module, "fetch_node_info", fake.fetch_node_info)
     # no real backoff in tests - individual tests only care whether
     # _confirm_payment eventually succeeds or gives up, never how long
     monkeypatch.setattr(router_module, "_CONFIRMATION_RETRY_DELAYS_SECONDS", ())

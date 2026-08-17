@@ -15,6 +15,7 @@ from .error_handler import LnurlErrorResponseHandler
 from .errors import log_internal_error
 from .mint_log import log_melt, log_mint
 from .models import (
+    LnurlMintAddressResponse,
     LnurlPayActionResponse,
     LnurlPayResponse,
     LnurlPayVerifyResponse,
@@ -24,6 +25,7 @@ from .models import (
 from .node import (
     LightningBackendConfig,
     create_invoice,
+    fetch_node_info,
     invoice_preimage,
     is_invoice_settled,
     is_payment_complete,
@@ -392,6 +394,51 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     if username != settings.username:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
     return _pay_response(req)
+
+
+async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
+    base, host = settings.public_base_url_and_host(str(req.base_url))
+    funding_source = settings.funding_source()
+    node_alias = node_uri = node_color = mint_pubkey_value = None
+    node_capacity_msat = None
+    if funding_source.backend:
+        try:
+            info = await fetch_node_info(funding_source)
+            node_alias = info.alias
+            node_uri = info.uri
+            node_color = info.color
+            node_capacity_msat = info.capacity_msat
+            # same derivation as signing.mint_pubkey - reused directly
+            # rather than calling that function, which would fetch_node_info
+            # a second time for the exact same round trip
+            mint_pubkey_value = info.uri.split("@")[0] if info.uri else None
+        except Exception as exc:
+            logging.warning("mint address: could not reach %s funding source: %s", funding_source.backend, exc)
+    return LnurlMintAddressResponse(
+        callback=f"{base}/w",
+        minWithdrawable=settings.min_mint_msat,
+        maxWithdrawable=settings.max_sendable_msat,
+        defaultDescription=f"lnurlcash bearer note on {host}",
+        mintPubkey=mint_pubkey_value,
+        payLink=f"{base}/p",
+        nodeAlias=node_alias,
+        nodeUri=node_uri,
+        nodeColor=node_color,
+        nodeCapacityMsat=node_capacity_msat,
+    )
+
+
+@router.get("/.well-known/lnurlw/{username}", tags=["lnurlcash"])
+async def get_mint_address(req: Request, username: str) -> LnurlMintAddressResponse:
+    """Theoretical mint-address alias, the withdraw-side mirror of
+    get_lnaddress above - see LnurlMintAddressResponse's own docstring for
+    why this is informational only (this mint's node identity/capacity,
+    the amount bounds a note can fall into, and `payLink` back to the
+    payRequest side), never a functional way to withdraw this mint's own
+    funds."""
+    if username != settings.username:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
+    return await _mint_address_response(req)
 
 
 @router.get("/p/cb", tags=["lnurlcash"])
