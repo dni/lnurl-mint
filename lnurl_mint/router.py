@@ -373,6 +373,17 @@ def _melt_fee_limit_msat(amount_msat: int) -> int:
     return max(round(amount_msat * 0.005), 5000, _mint_fee_msat(amount_msat))
 
 
+def _known_username(username: str) -> bool:
+    """LUD-16's reserved default username: `_` isn't user facing - it's
+    what any WALLET/directory resolving a *bare-domain* address (no
+    visible user part, shown as just `{host}` rather than `_@{host}`)
+    queries instead of settings.username, per spec. Accepted alongside
+    settings.username (never in place of it) on both well-known aliases
+    below - this mint answers identically for either name, since both
+    name the same identity."""
+    return username == settings.username or username == "_"
+
+
 @router.get("/.well-known/lnurlp/{username}", tags=["lnurlcash"])
 def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     """LUD-16 Lightning Address payRequest that mints lnurlcash bearer
@@ -380,14 +391,19 @@ def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
     (get_withdraw) that will recognize this mint's payment preimages -
     paying the invoice from the callback makes `<withdrawLink>?k1=<preimage>`
     a bearer note. The mint is payable at {settings.username}@{host} (see
-    the frontend one-pager) - this well-known alias is this mint's only
+    the frontend one-pager), or at the reserved bare-domain `_@{host}` (see
+    _known_username) - this well-known alias is this mint's only
     payRequest entry point, there's no separate bare /p."""
-    if username != settings.username:
+    if not _known_username(username):
         raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
     base, host = settings.public_base_url_and_host(str(req.base_url))
     metadata_entries = [
         ["text/plain", f"Mint an lnurlcash bearer note on {host}"],
-        ["text/identifier", f"{settings.username}@{host}"],
+        # echoes back whichever name was actually queried (settings.username
+        # or the reserved `_`), not always the former - a WALLET that
+        # resolved `_@{host}` per LUD-16's bare-domain convention should see
+        # that same identity confirmed here, not a different-looking one
+        ["text/identifier", f"{username}@{host}"],
     ]
     if settings.base_fee_msat or settings.fee_percent_ppm:
         # a SERVICE that omits this entry is assumed fee-free per spec, so
@@ -446,8 +462,9 @@ async def get_mint_address(req: Request, username: str) -> LnurlMintAddressRespo
     why this is informational only (this mint's node identity/capacity,
     the amount bounds a note can fall into, and `payLink` back to the
     payRequest side), never a functional way to withdraw this mint's own
-    funds."""
-    if username != settings.username:
+    funds. Also answers for the reserved bare-domain `_` username, same as
+    get_lnaddress (see _known_username)."""
+    if not _known_username(username):
         raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
     return await _mint_address_response(req)
 

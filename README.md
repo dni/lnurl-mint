@@ -17,12 +17,25 @@ a reference wallet implementation (hosted at
 | Endpoint        | Role                                                                          |
 |-----------------|-------------------------------------------------------------------------------|
 | `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity |
-| `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}`, and this is its only payRequest entry point (no separate bare `/p`) |
+| `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}` (or the reserved bare-domain `_@{BASE_URL host}`, see below), and this is its only payRequest entry point (no separate bare `/p`) |
 | `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
+
+**Bare-domain address** ([LUD-16](../luds/16.md)): both well-known aliases
+above also answer for the reserved username `_`, alongside the configured
+`USERNAME` - so `_@{BASE_URL host}` reaches the exact same mint identity
+as `{USERNAME}@{BASE_URL host}`. Per spec, `_` isn't meant to be user
+facing: it's what a WALLET/directory resolves when it wants to display
+just the bare domain (`{BASE_URL host}`) rather than a visible username -
+a WALLET recognizing the convention hides the `_` on its own, this mint
+just needs to answer for it. `text/identifier` in the payRequest's
+`metadata` echoes back whichever name was actually queried (`_` or
+`USERNAME`), not always the latter, so a WALLET that resolved the
+bare-domain form sees that same identity confirmed rather than a
+different-looking one.
 
 Callback semantics (`/w/cb`):
 
