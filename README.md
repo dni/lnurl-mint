@@ -91,6 +91,14 @@ rounded *up* to the nearest whole sat (never left at fractional-msat
 precision), so the mint is never short a sat versus the naive estimate a
 wallet derives from the metadata formula above.
 
+**Sunset** (optional): set `SUNSET_MINT=true` to wind this mint down.
+`/p/cb` and `/w/cb`'s split branch both start rejecting outright
+(`{"status": "ERROR", "reason": "This mint is sunsetting - ..."}`), since
+both grow the number of outstanding notes; rotate, merge, and melt are all
+left alone - none of them increases this mint's outstanding liability, and
+holders still need to be able to consolidate and redeem what they already
+have. Off by default.
+
 **Offline verification** (optional): if a funding source is configured, `GET
 /w` advertises a `mintPubkey` - that node's own identity, the same key
 it signs BOLT-11 invoices with - and rotate/split/merge responses carry a

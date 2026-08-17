@@ -450,6 +450,8 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
 
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
     no node of its own poll settlement status - see verify_invoice."""
+    if settings.sunset_mint:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "This mint is sunsetting - minting is disabled.")
     if amount < settings.min_sendable_msat:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Amount too low.")
     if amount > settings.max_sendable_msat:
@@ -626,7 +628,9 @@ async def get_withdraw_callback(
       source is configured or signing fails (see signing.sign_note).
     - If any k1 is invalid the whole request fails atomically
       (NoteStore.swap); a k1 already reserved by another in-flight melt
-      fails with reason "pending" instead (NoteStore.mark_pending)."""
+      fails with reason "pending" instead (NoteStore.mark_pending).
+    - split rejects outright while SUNSET_MINT is on, same as /p/cb - see
+      that setting's own docstring in config.py."""
     if len(k1) > settings.max_k1s:
         raise HTTPException(HTTPStatus.BAD_REQUEST, f"Too many k1s (max {settings.max_k1s}).")
 
@@ -634,6 +638,14 @@ async def get_withdraw_callback(
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, "pr cannot be combined with multiple k1s or amount - merge or split first."
         )
+
+    # split (amount is not None, since the check above already rejects it
+    # alongside pr) grows the number of outstanding notes just like a fresh
+    # mint - rejected the same way while sunsetting. rotate/merge/melt are
+    # all left alone: none of them increases this mint's liability, and a
+    # sunsetting operator still needs holders able to consolidate/redeem.
+    if settings.sunset_mint and amount is not None:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "This mint is sunsetting - splitting is disabled.")
 
     # checked before any note is resolved, so an invalid/missing hash never
     # burns anything
