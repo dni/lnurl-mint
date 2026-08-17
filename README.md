@@ -169,7 +169,10 @@ purely so a wallet or directory resolving `{username}@{host}` on its
 withdraw side learns something useful instead of a bare 404: this mint's
 own node identity (alias, color, capacity - see below),
 `minWithdrawable`/`maxWithdrawable` mirroring the amount bounds a freshly
-minted note can fall into (`MIN_MINT_MSAT`/`MAX_SENDABLE_MSAT`), and
+minted note can actually fall into (`MIN_MINT_MSAT`, and `MAX_SENDABLE_MSAT`
+itself net of whatever mint fee is configured - the same fee-aware
+treatment `/p`'s own `minSendable` already gets on the floor side, see
+`router.max_mintable_msat`), and
 `payLink` pointing back at `/p` - completing the loop `/p`'s own
 `withdrawLink` starts. `callback` points at the real `/w` for LUD-03 shape
 symmetry, but with no `k1` to append, calling it yields nothing more than
