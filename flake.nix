@@ -161,7 +161,9 @@
               machine.wait_for_unit("lnurl-mint.service")
               machine.wait_for_open_port(8111)
               # LUD-06 payRequest works without a funding source configured
-              machine.succeed("curl -sf http://localhost:8111/p | grep -q withdrawLink")
+              # (no bare /p since #14 - the well-known alias is the only
+              # payRequest entry point; `_` is the reserved bare-domain name)
+              machine.succeed("curl -sf http://localhost:8111/.well-known/lnurlp/_ | grep -q withdrawLink")
               # the mutating callback correctly reports the missing funding source
               machine.succeed("curl -sf 'http://localhost:8111/p/cb?amount=50000' | grep -q 'not configured'")
               # the frontend one-pager renders
