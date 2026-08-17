@@ -423,14 +423,14 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
     base, host = settings.public_base_url_and_host(str(req.base_url))
     funding_source = settings.funding_source()
     node_alias = node_uri = node_color = mint_pubkey_value = None
-    node_capacity_msat = node_num_channels = node_num_peers = None
+    node_capacity = node_num_channels = node_num_peers = None
     if funding_source.backend:
         try:
             info = await fetch_node_info(funding_source)
             node_alias = info.alias
             node_uri = info.uri
             node_color = info.color
-            node_capacity_msat = info.capacity_msat
+            node_capacity = info.capacity
             node_num_channels = info.num_channels
             node_num_peers = info.num_peers
             # same derivation as signing.mint_pubkey - reused directly
@@ -449,7 +449,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
         nodeAlias=node_alias,
         nodeUri=node_uri,
         nodeColor=node_color,
-        nodeCapacityMsat=node_capacity_msat,
+        nodeCapacity=node_capacity,
         nodeNumChannels=node_num_channels,
         nodeNumPeers=node_num_peers,
     )

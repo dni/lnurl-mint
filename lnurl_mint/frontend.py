@@ -256,7 +256,7 @@ async def _node_section() -> tuple[str, str | None]:
         connect_copy=_copy_button(connect_string, "Copy connect string"),
         num_channels=node.num_channels,
         num_peers=node.num_peers,
-        capacity=_format_sats(node.capacity_msat),
+        capacity=_format_sats(node.capacity),
     )
     return section, color
 

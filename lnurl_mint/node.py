@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import ssl
 from base64 import b64decode, b64encode
@@ -577,7 +578,15 @@ class NodeInfo(BaseModel):
     color: str | None = None  # "#rrggbb", the node's self-reported display color
     num_channels: int = 0
     num_peers: int = 0
-    capacity_msat: int = 0  # sum of this node's own channels' total capacity
+    # msat, same denomination as every other amount in this codebase (not
+    # named capacity_msat - unlike those, there's no sibling sat-denominated
+    # field it needs to disambiguate itself from): sum of this node's
+    # *publicly announced* channels' capacity only, sourced from each
+    # backend's public graph/gossip view - see _fetch_node_info_lnd/
+    # _fetch_node_info_cln for why, never from a private/authenticated view
+    # of this node's own channels (which would also count unannounced ones
+    # this node's public presence gives no one else visibility into)
+    capacity: int = 0
 
 
 _HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
@@ -617,22 +626,27 @@ async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackend
     unannounced channels or their individual balances, so it costs no
     privacy this node's public presence doesn't already give away. Best
     effort: a failure there (e.g. an unannounced node with nothing in the
-    graph yet) is swallowed rather than failing the whole getinfo, since
-    capacity is purely informational."""
+    graph yet, or a macaroon not scoped for it - see README) is logged but
+    swallowed rather than failing the whole getinfo, since capacity is
+    purely informational - leaves capacity at 0 rather than raising, but
+    the warning at least makes a silent 0 diagnosable instead of
+    indistinguishable from "this node genuinely has none"."""
     headers = {"Grpc-Metadata-macaroon": macaroon}
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.get(f"{url}/v1/getinfo", headers=headers)
         await _raise_for_status(res)
         info = res.json()
-        capacity_msat = 0
+        capacity = 0
         pubkey = info.get("identity_pubkey")
         if pubkey:
             try:
                 node_res = await client.get(f"{url}/v1/graph/node/{pubkey}", headers=headers)
                 await _raise_for_status(node_res)
-                capacity_msat = int(node_res.json().get("total_capacity", 0)) * 1000
-            except Exception:
-                pass
+                # lnd reports total_capacity in sats, not msat - converted
+                # here so NodeInfo.capacity stays msat-denominated
+                capacity = int(node_res.json().get("total_capacity", 0)) * 1000
+            except Exception as exc:
+                logging.warning("fetch_node_info: could not fetch capacity from lnd's graph: %s", exc)
     uris = info.get("uris") or []
     return NodeInfo(
         alias=info.get("alias") or None,
@@ -640,7 +654,7 @@ async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackend
         color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),
-        capacity_msat=capacity_msat,
+        capacity=capacity,
     )
 
 
@@ -655,9 +669,13 @@ async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConf
     listchannels entry per direction (two channel_update messages sharing
     one capacity), so entries are deduplicated by short_channel_id before
     summing - counting both would double the real total. Best effort: a
-    failure here (e.g. a node with nothing announced yet) is swallowed
-    rather than failing the whole getinfo, since capacity is purely
-    informational."""
+    failure here (e.g. a node with nothing announced yet, or a rune not
+    scoped for `listchannels` - see README, a common gap for a rune baked
+    before this method was added to the required set) is logged but
+    swallowed rather than failing the whole getinfo, since capacity is
+    purely informational - leaves capacity at 0 rather than raising, but
+    the warning at least makes a silent 0 diagnosable instead of
+    indistinguishable from "this node genuinely has none"."""
     headers = {"Rune": rune}
     async with httpx.AsyncClient(verify=config.verify) as client:
         res = await client.post(f"{url}/v1/getinfo", headers=headers)
@@ -677,8 +695,8 @@ async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConf
                         continue
                     seen_scids.add(scid)
                     capacity_msat += int(c.get("amount_msat", 0))
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.warning("fetch_node_info: could not fetch capacity from cln's listchannels: %s", exc)
     uri = node_id
     addresses = info.get("address") or []
     if node_id and addresses and addresses[0].get("address") and addresses[0].get("port"):
@@ -689,7 +707,7 @@ async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConf
         color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),
-        capacity_msat=capacity_msat,
+        capacity=capacity_msat,
     )
 
 

@@ -190,20 +190,27 @@ side, see `router.max_mintable_msat`), and `payLink` pointing back at
 symmetry, but with no `k1` to append, calling it yields nothing more than
 `/w`'s own "Unknown note" - never a way to draw on this mint's funds.
 
-**Capacity**: `NodeInfo.capacity_msat` (frontend one-pager and the mint
-address response above) is this node's total announced channel capacity -
-not part of either backend's plain getinfo, so it costs a second call
-alongside it, deliberately sourced from the *public* graph rather than a
-private view of this node's own channels: lnd's `GET
-/v1/graph/node/{pubkey}` (self-lookup, `total_capacity`) and cln's
-`listchannels` filtered to `source=<own id>`, the same
+**Capacity**: `NodeInfo.capacity` (msat, same as every other amount in this
+codebase - frontend one-pager and the mint address response above, as
+`nodeCapacity`) is this node's total *publicly announced* channel
+capacity, and only that - never a private/authenticated view of this
+node's own channels, so the number reported here is never more than what
+this node's public presence already gives away on its own. Not part of
+either backend's plain getinfo, so it costs a second call alongside it,
+deliberately sourced from the public graph: lnd's `GET
+/v1/graph/node/{pubkey}` (self-lookup, `total_capacity`, converted from
+sats) and cln's `listchannels` filtered to `source=<own id>` (summed
+directly from `amount_msat`), the same
 `total_capacity`/`channel_announcement`s any other node on the network
 already sees. Neither can be used to read this node's own private/
 unannounced channels or their local/remote balance split the way
-`ListChannels`/`listfunds` could - the number reported here is never more
-than what this node's public presence already gives away. Best effort: a
-node with nothing announced in the graph yet simply reports `0` rather
-than failing the whole node lookup.
+`ListChannels`/`listfunds` could. Best effort: a failure here (nothing
+announced in the graph yet, or - a common gap after upgrading - a
+macaroon/rune baked before `GetNodeInfo`/`listchannels` were added to the
+required set below) is logged as a warning and leaves capacity at `0`
+rather than failing the whole node lookup; check the logs for "could not
+fetch capacity" if it's unexpectedly `0` on a node that does have public
+channels.
 
 **Tor**: set `ONION_URL` to this mint's hidden service address (e.g.
 `http://<v3-address>.onion`) to advertise it on the frontend one-pager as an
@@ -231,7 +238,7 @@ notes still work).
 
 **cln rune**: this mint only ever calls `invoice`, `xpay`, `signmessage`,
 `listinvoices`, `listpays`, `getinfo` and `listchannels` (see `node.py`) -
-`listchannels` reads the *public* gossip store (for `capacity_msat`, see
+`listchannels` reads the *public* gossip store (for `capacity`, see
 above), never this node's own private `listfunds` view - so scope
 `FUNDINGSOURCE_RUNE` to just those instead of handing it a full-access
 rune:
@@ -257,7 +264,7 @@ lncli bakemacaroon invoices:write invoices:read offchain:write offchain:read mes
 ```
 
 `info:read` (already included above for `GetInfo`) also covers
-`GetNodeInfo` (a public-graph lookup, used for `capacity_msat` - see
+`GetNodeInfo` (a public-graph lookup, used for `capacity` - see
 above), so no extra permission is needed beyond what this mint already
 requires.
 
