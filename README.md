@@ -354,6 +354,14 @@ time. The module composes with the rest of your node config the way you'd
 expect - point `FUNDINGSOURCE_URL` at your clnrest/lnd REST and scope the
 rune/macaroon as described above.
 
+The nix build is pinned to `flake.lock`'s nixpkgs and runs the full test
+suite in the build sandbox, so a python dependency that is added or
+re-pinned in `pyproject.toml` without updating `nix/package.nix` fails the
+`nix` CI job on that very PR - bump the `dependencies` list there when
+`pyproject.toml` changes. `bolt11` is not in nixpkgs and is vendored in
+`nix/package.nix` - bump its pinned commit and `hash` there alongside any
+bolt11 version bump in `pyproject.toml`/`uv.lock`.
+
 ## Test
 
 ```sh

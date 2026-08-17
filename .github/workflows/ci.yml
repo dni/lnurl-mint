@@ -51,6 +51,26 @@ jobs:
       - name: pytest
         run: uv run pytest
 
+  nix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31.9.1
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      # builds the app and runs the full pytest suite inside the nix
+      # sandbox - fails if a python dependency was added or re-pinned in
+      # pyproject.toml without updating nix/package.nix (see README, "Nix")
+      - name: Build package
+        run: nix build .#lnurl-mint --print-build-logs
+
+      # module eval + a NixOS VM smoke test of the module
+      - name: Flake check
+        run: nix flake check --print-build-logs
+
   docker:
     runs-on: ubuntu-24.04
     steps:
