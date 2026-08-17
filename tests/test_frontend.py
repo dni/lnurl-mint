@@ -99,6 +99,16 @@ def test_mint_address_combines_withdraw_and_node_info(client: TestClient, node):
     assert "k1" not in data
 
 
+def test_mint_address_max_withdrawable_accounts_for_mint_fee(client: TestClient, node, monkeypatch):
+    # maxWithdrawable must reflect what a note can actually net, not the raw
+    # MAX_SENDABLE_MSAT setting - paying the full max still has the
+    # configured fee withheld (see router.max_mintable_msat), the same
+    # fee-aware treatment /p's own minSendable already gets on the floor
+    monkeypatch.setattr(settings, "base_fee_msat", 1000)
+    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
+    assert data["maxWithdrawable"] == settings.max_sendable_msat - 1000
+
+
 def test_mint_address_rejects_unknown_username(client: TestClient):
     data = client.get("/.well-known/lnurlw/nobody").json()
     assert data["status"] == "ERROR"
@@ -117,4 +127,12 @@ def test_index_shows_capacity_and_mint_limits(client: TestClient, node):
     response = client.get("/")
     assert "750,000 sats" in response.text
     assert f"{settings.min_mint_msat // 1000:,} sats" in response.text
+    # fee-free test settings (see conftest.py) - the fee-adjusted ceiling
+    # equals the raw setting here, the adjustment itself is exercised below
     assert f"{settings.max_sendable_msat // 1000:,} sats" in response.text
+
+
+def test_index_max_amount_accounts_for_mint_fee(client: TestClient, node, monkeypatch):
+    monkeypatch.setattr(settings, "base_fee_msat", 1000)
+    response = client.get("/")
+    assert f"{(settings.max_sendable_msat - 1000) // 1000:,} sats" in response.text

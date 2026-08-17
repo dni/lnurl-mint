@@ -343,6 +343,21 @@ def _min_sendable_msat() -> int:
     raise RuntimeError("minSendable walk did not terminate - check the fee settings (fee_percent_ppm too high?)")
 
 
+def max_mintable_msat() -> int:
+    """The largest a freshly minted note's own value can actually reach -
+    paying the advertised maxSendable (max_sendable_msat) nets
+    max_sendable_msat minus whatever _mint_fee_msat withholds at that
+    amount (see get_pay_callback), so whenever a mint fee is configured the
+    true ceiling on a note's value sits below the raw setting, same
+    fee-aware treatment _min_sendable_msat gives the floor, just for the
+    other end. No walk needed here (unlike _min_sendable_msat): the fee
+    is computed directly from max_sendable_msat itself, not searched for.
+    Public (unlike this module's other fee helpers) because the
+    mint-address discovery response and the frontend's own mint-limits
+    display both need this exact number, not just router.py."""
+    return settings.max_sendable_msat - _mint_fee_msat(settings.max_sendable_msat)
+
+
 def _melt_fee_limit_msat(amount_msat: int) -> int:
     """The routing-fee budget for melting a note worth `amount_msat` - per
     LUD-25, the mint fee withheld at mint time "is meant to cover whatever
@@ -417,7 +432,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
     return LnurlMintAddressResponse(
         callback=f"{base}/w",
         minWithdrawable=settings.min_mint_msat,
-        maxWithdrawable=settings.max_sendable_msat,
+        maxWithdrawable=max_mintable_msat(),
         defaultDescription=f"lnurlcash bearer note on {host}",
         mintPubkey=mint_pubkey_value,
         payLink=f"{base}/p",

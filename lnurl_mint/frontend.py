@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from . import __version__
 from .config import settings
 from .node import fetch_node_info
+from .router import max_mintable_msat
 
 frontend_router = APIRouter()
 
@@ -211,13 +212,16 @@ def _format_sats(amount_msat: int) -> str:
 
 def _limits_section() -> str:
     """The Mint table's HTML: the amount bounds a freshly minted note can
-    fall into - min_mint_msat (the floor a note's value must clear net of
-    fees) and max_sendable_msat (the ceiling on what /p/cb accepts), the
-    same two settings advertised on the mint-address discovery endpoint
-    (see router.get_mint_address)."""
+    actually fall into - min_mint_msat (the floor a note's value must clear
+    net of fees) and router.max_mintable_msat (the fee-adjusted ceiling: a
+    note minted from the full max_sendable_msat still nets less than that
+    raw setting whenever a mint fee is configured, same as /p's own
+    minSendable already accounts for on the floor side - see
+    router._min_sendable_msat), the same two numbers advertised on the
+    mint-address discovery endpoint (see router.get_mint_address)."""
     return LIMITS_SECTION.substitute(
         min_amount=_format_sats(settings.min_mint_msat),
-        max_amount=_format_sats(settings.max_sendable_msat),
+        max_amount=_format_sats(max_mintable_msat()),
     )
 
 
