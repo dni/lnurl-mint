@@ -25,8 +25,8 @@ class LnurlPayActionResponse(BaseModel):
 
     `disposable` (LUD-11) tells a WALLET whether the payRequest LNURL/
     lightning address itself (not this one invoice) is meant to be kept
-    around and reused - always `false` here: `/p` and the LUD-16 address
-    are this mint's permanent, repeatable way to mint a fresh note, not a
+    around and reused - always `false` here: the LUD-16 address is this
+    mint's permanent, repeatable way to mint a fresh note, not a
     one-shot link that stops working after this payment. Per LUD-11, a
     WALLET that doesn't recognize this field at all is required to treat
     a link as disposable by default and may discard it - `false` must be

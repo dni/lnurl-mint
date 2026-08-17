@@ -39,7 +39,10 @@ def test_public_base_url_still_prefers_base_url_over_request(monkeypatch):
 
 def test_pay_response_uses_onion_url_when_reached_via_onion(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "onion_url", ONION)
-    response = client.get("/p", headers={"host": "abcdefghijklmnop1234567890abcdefghijklmnop1234567890abcdefgh.onion"})
+    response = client.get(
+        f"/.well-known/lnurlp/{settings.username}",
+        headers={"host": "abcdefghijklmnop1234567890abcdefghijklmnop1234567890abcdefgh.onion"},
+    )
     data = response.json()
     assert data["callback"] == f"{ONION}/p/cb"
     assert data["withdrawLink"] == f"{ONION}/w"

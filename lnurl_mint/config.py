@@ -55,12 +55,12 @@ class Settings(BaseSettings):
     # (a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
     # amount paid), meant to cover the routing cost of eventually paying
     # the note back out on melt. Advertised in /p/cb's payRequest metadata
-    # (see router._pay_response) so a wallet can warn the payer up front -
+    # (see router.get_lnaddress) so a wallet can warn the payer up front -
     # omitted from metadata entirely (assumed fee-free per spec) when both
     # are zero. fee_percent_ppm is bounded well below 1_000_000 (100%): at
     # or above that the fee can never leave a positive net amount, which
     # sends router._min_sendable_msat's walk into a non-terminating loop -
-    # and even merely close to it, each /p request burns millions of loop
+    # and even merely close to it, each lnaddress request burns millions of loop
     # iterations of CPU. 100_000 (10%) keeps the walk under ~100 steps.
     base_fee_msat: int = Field(default=1000, ge=0)
     fee_percent_ppm: int = Field(default=0, ge=0, le=100_000)

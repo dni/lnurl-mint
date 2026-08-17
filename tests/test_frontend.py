@@ -20,8 +20,8 @@ def test_index_shows_title_description_qr_and_address(client: TestClient):
     assert settings.description in response.text
     assert "<svg" in response.text
     assert f"{settings.username}@testserver" in response.text
-    # the QR/copy string is the bech32 LNURL of the mint's payRequest
-    assert lnurl_encode("http://testserver/p") in response.text
+    # the QR/copy string is the bech32 LNURL of the mint's LUD-16 payRequest
+    assert lnurl_encode(f"http://testserver/.well-known/lnurlp/{settings.username}") in response.text
 
 
 def test_index_links_to_the_wallet_with_this_mints_address(client: TestClient):
@@ -55,10 +55,10 @@ def test_index_without_funding_source(client: TestClient, monkeypatch):
 def test_base_url_setting_overrides_request_url(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "base_url", "https://mint.example")
     response = client.get("/")
-    assert lnurl_encode("https://mint.example/p") in response.text
+    assert lnurl_encode(f"https://mint.example/.well-known/lnurlp/{settings.username}") in response.text
     assert f"{settings.username}@mint.example" in response.text
 
-    pay = client.get("/p").json()
+    pay = client.get(f"/.well-known/lnurlp/{settings.username}").json()
     assert pay["callback"] == "https://mint.example/p/cb"
     assert pay["withdrawLink"] == "https://mint.example/w"
     assert f"{settings.username}@mint.example" in pay["metadata"]
@@ -87,7 +87,7 @@ def test_mint_address_combines_withdraw_and_node_info(client: TestClient, node):
     data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
     assert data["tag"] == "withdrawRequest"
     assert data["callback"] == "http://testserver/w"
-    assert data["payLink"] == "http://testserver/p"
+    assert data["payLink"] == f"http://testserver/.well-known/lnurlp/{settings.username}"
     assert data["minWithdrawable"] == settings.min_mint_msat
     assert data["maxWithdrawable"] == settings.max_sendable_msat
     assert data["nodeAlias"] == "fakenode"
@@ -105,7 +105,7 @@ def test_mint_address_max_withdrawable_accounts_for_mint_fee(client: TestClient,
     # maxWithdrawable must reflect what a note can actually net, not the raw
     # MAX_SENDABLE_MSAT setting - paying the full max still has the
     # configured fee withheld (see router.max_mintable_msat), the same
-    # fee-aware treatment /p's own minSendable already gets on the floor
+    # fee-aware treatment the LUD-16 address's own minSendable already gets on the floor
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
     assert data["maxWithdrawable"] == settings.max_sendable_msat - 1000
@@ -120,7 +120,7 @@ def test_mint_address_without_funding_source(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "fundingsource_backend", None)
     data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
     assert data["tag"] == "withdrawRequest"
-    assert data["payLink"] == "http://testserver/p"
+    assert data["payLink"] == f"http://testserver/.well-known/lnurlp/{settings.username}"
     assert "nodeAlias" not in data
     assert "mintPubkey" not in data
 

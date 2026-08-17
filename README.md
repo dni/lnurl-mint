@@ -16,13 +16,12 @@ a reference wallet implementation (hosted at
 
 | Endpoint        | Role                                                                          |
 |-----------------|-------------------------------------------------------------------------------|
-| `GET /`         | one-pager frontend: mint QR code (LNURL of `/p`), lightning address, mint limits, node info incl. capacity |
-| `GET /p`      | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement)      |
+| `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity |
+| `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}`, and this is its only payRequest entry point (no separate bare `/p`) |
 | `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
-| `GET /.well-known/lnurlp/{username}` | LUD-16 alias for `/p`, the mint is payable at `{USERNAME}@{BASE_URL host}` |
 | `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
 
 Callback semantics (`/w/cb`):
@@ -81,7 +80,7 @@ flat amount plus a parts-per-million cut of every mint's `amount`, credited
 to `k1=P`'s note instead of the full amount paid - meant to cover the
 routing cost of eventually paying that note back out on melt. Advertised as
 an extra `["text/plain", "Mint fees: <base_fee_msat>,<fee_percent_ppm>"]`
-entry in `/p`'s `metadata`, so a wallet that recognizes the `Mint fees: `
+entry in the LUD-16 address's `metadata`, so a wallet that recognizes the `Mint fees: `
 prefix can warn the payer up front; omitted entirely (assumed fee-free per
 spec) when both are `0`. `MIN_MINT_MSAT` (default 10 sats) floors the note's
 value net of this fee - not `amount` itself, which `MIN_SENDABLE_MSAT`
@@ -171,9 +170,9 @@ own node identity (alias, color, capacity, channel/peer counts - see below),
 `minWithdrawable`/`maxWithdrawable` mirroring the amount bounds a freshly
 minted note can actually fall into (`MIN_MINT_MSAT`, and `MAX_SENDABLE_MSAT`
 itself net of whatever mint fee is configured - the same fee-aware
-treatment `/p`'s own `minSendable` already gets on the floor side, see
-`router.max_mintable_msat`), and
-`payLink` pointing back at `/p` - completing the loop `/p`'s own
+treatment the LUD-16 address's own `minSendable` already gets on the floor
+side, see `router.max_mintable_msat`), and `payLink` pointing back at
+`/.well-known/lnurlp/{username}` - completing the loop that address's own
 `withdrawLink` starts. `callback` points at the real `/w` for LUD-03 shape
 symmetry, but with no `k1` to append, calling it yields nothing more than
 `/w`'s own "Unknown note" - never a way to draw on this mint's funds.

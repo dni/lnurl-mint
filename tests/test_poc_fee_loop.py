@@ -37,8 +37,8 @@ def test_fee_percent_ppm_at_or_above_100_percent_rejected_at_startup():
 
 def test_fee_percent_ppm_above_the_practical_bound_is_also_rejected():
     # even 999_999 ppm is legal-terminating in theory but costs ~10M loop
-    # iterations of CPU per GET /p - the bound sits at 100_000 (10%),
-    # keeping the _min_sendable_msat walk under ~100 steps
+    # iterations of CPU per lnaddress request - the bound sits at 100_000
+    # (10%), keeping the _min_sendable_msat walk under ~100 steps
     with pytest.raises(ValidationError):
         Settings(fee_percent_ppm=100_001)
     assert Settings(fee_percent_ppm=100_000).fee_percent_ppm == 100_000
