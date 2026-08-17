@@ -105,6 +105,11 @@ class LnurlMintAddressResponse(BaseModel):
     nodeUri: str | None = None
     nodeColor: str | None = None
     nodeCapacityMsat: int | None = None
+    # same channel/peer counts NODE_SECTION already shows on the one-pager
+    # frontend (see frontend._node_section) - included here too so a wallet
+    # discovering this endpoint gets the same picture without scraping HTML
+    nodeNumChannels: int | None = None
+    nodeNumPeers: int | None = None
 
 
 class WithdrawSuccessResponse(BaseModel):

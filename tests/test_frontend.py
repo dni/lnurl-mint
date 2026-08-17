@@ -94,6 +94,8 @@ def test_mint_address_combines_withdraw_and_node_info(client: TestClient, node):
     assert data["nodeUri"] == f"{node.pubkey}@127.0.0.1:9735"
     assert data["nodeColor"] == "#3399ff"
     assert data["nodeCapacityMsat"] == 750_000_000
+    assert data["nodeNumChannels"] == 3
+    assert data["nodeNumPeers"] == 5
     assert data["mintPubkey"] == node.pubkey
     # theoretical/informational only - no real note k1 backs this address
     assert "k1" not in data
