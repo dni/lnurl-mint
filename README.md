@@ -167,7 +167,7 @@ per-user accounts, so there is no balance behind `{username}` for anyone
 to actually withdraw - unlike `/w`, its response carries no `k1`. It exists
 purely so a wallet or directory resolving `{username}@{host}` on its
 withdraw side learns something useful instead of a bare 404: this mint's
-own node identity (alias, color, capacity - see below),
+own node identity (alias, color, capacity, channel/peer counts - see below),
 `minWithdrawable`/`maxWithdrawable` mirroring the amount bounds a freshly
 minted note can actually fall into (`MIN_MINT_MSAT`, and `MAX_SENDABLE_MSAT`
 itself net of whatever mint fee is configured - the same fee-aware
