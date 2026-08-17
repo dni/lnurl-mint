@@ -113,10 +113,17 @@
                   {
                     services.lnurl-mint = {
                       enable = true;
+                      verifyEnabled = false;
+                      fundingSource = {
+                        backend = "cln";
+                        url = "https://localhost:3010";
+                      };
                       settings = {
                         BASE_URL = "https://mint.example";
-                        VERIFY_ENABLED = false;
                         BASE_FEE_MSAT = 1000;
+                        # a raw key losing to its dedicated option is the
+                        # documented precedence - pin it
+                        VERIFY_ENABLED = true;
                       };
                     };
                     system.stateVersion = "25.11";
@@ -132,6 +139,8 @@
               grep -q '"DynamicUser":true' $unit
               grep -q '"BASE_URL":"https://mint.example"' $unit
               grep -q '"VERIFY_ENABLED":"false"' $unit
+              grep -q '"FUNDINGSOURCE_BACKEND":"cln"' $unit
+              grep -q '"FUNDINGSOURCE_URL":"https://localhost:3010"' $unit
               grep -q '/bin/lnurl-mint --host 127.0.0.1 --port 8111' $unit
               touch $out
             '';

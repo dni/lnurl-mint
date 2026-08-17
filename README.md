@@ -262,12 +262,14 @@ On NixOS, run the mint as a hardened systemd service:
         {
           services.lnurl-mint = {
             enable = true;
-            settings = {
-              BASE_URL = "https://mint.example.com";
-              FUNDINGSOURCE_BACKEND = "cln";
-              FUNDINGSOURCE_URL = "https://localhost:3010";
+            # verifyEnabled = true is the default - set false to 404
+            # /verify entirely (see "The observer race, plainly" above)
+            settings.BASE_URL = "https://mint.example.com";
+            fundingSource = {
+              backend = "cln";
+              url = "https://localhost:3010";
             };
-            # secrets stay out of the nix store - this file carries
+            # credentials stay out of the nix store - this file carries
             # FUNDINGSOURCE_RUNE (or FUNDINGSOURCE_MACAROON for lnd)
             environmentFiles = [ "/run/secrets/lnurl-mint" ];
           };
