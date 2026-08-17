@@ -328,11 +328,17 @@ def _min_sendable_msat() -> int:
     settings.min_sendable_msat when it doesn't clear that net floor means
     paying the advertised minimum always bounces, so this walks amount up
     from the higher of the two configured floors until its net clears
-    min_mint_msat too."""
+    min_mint_msat too. Bounded defensively: fee_percent_ppm is validated
+    to stay well below 100% (see config.py), which guarantees the walk
+    terminates quickly - the cap turns any future regression of that
+    guarantee into a loud error at request time rather than a worker
+    spinning at 100% CPU for the process's lifetime."""
     amount_msat = max(settings.min_sendable_msat, settings.min_mint_msat)
-    while amount_msat - _mint_fee_msat(amount_msat) < settings.min_mint_msat:
+    for _ in range(100_000):
+        if amount_msat - _mint_fee_msat(amount_msat) >= settings.min_mint_msat:
+            return amount_msat
         amount_msat += 1000
-    return amount_msat
+    raise RuntimeError("minSendable walk did not terminate - check the fee settings (fee_percent_ppm too high?)")
 
 
 def _melt_fee_limit_msat(amount_msat: int) -> int:
@@ -449,12 +455,15 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     """LUD-21: reports whether an invoice this mint issued (via /p/cb) or
     paid out (a melt, via /w/cb - LUD-25) has settled - looked up by
     payment_hash, unguessable but not itself secret, same as any other
-    LUD-21 verify. Works whenever hit directly, regardless of
-    VERIFY_ENABLED - that setting only controls whether /p/cb and a melt's
-    own response *advertise* this URL, the same way LUD-21 implementations
-    elsewhere in this ecosystem treat their own verify toggle. mint_pr and
-    melt_pr are separate tables keyed by two different invoices' payment
-    hashes, so a lookup can never accidentally match the wrong direction.
+    LUD-21 verify. Served only while VERIFY_ENABLED is on: unlike the
+    usual ecosystem convention (where such a flag merely gates whether
+    callbacks *advertise* the URL), false here disables the endpoint
+    entirely (404) - deliberately, because for a mint the response's
+    `preimage` is not mere proof of payment but the bearer note's spend
+    secret itself (see below), so an operator who doesn't want it served
+    needs a real off switch, not just a hidden URL. mint_pr and melt_pr
+    are separate tables keyed by two different invoices' payment hashes,
+    so a lookup can never accidentally match the wrong direction.
 
     For a mint, `preimage`, once settled, IS the bearer note's spend secret
     (see LUD-25's Minting a bearer note from a payRequest) - deliberately
@@ -463,8 +472,12 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     has no other way to learn it and claim the note. Per the spec's
     Security considerations, that wallet MUST then rotate the note
     immediately: `SERVICE`'s own node already is a permanent prior holder
-    of this secret, and verify only makes confirming settlement
-    convenient, it does nothing to shrink that exposure window on its own.
+    of this secret, and the payment hash travels inside the invoice
+    itself, so ANY holder of the invoice (a bystander seeing the QR, a
+    screenshot, a log line) can win the note by polling verify and
+    rotating first. A spec-compliant wallet rotates the moment its
+    payment settles and wins that race by construction; manual or
+    custodial flows that don't are exposed for as long as they wait.
 
     For a melt, `preimage` is simply that outgoing payment's own settlement
     proof (see _melt_preimage) - not a bearer secret at all, since the
@@ -472,6 +485,8 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     it. Because a BOLT-11 `pr` commits to payment_hash = sha256(preimage),
     anyone holding both can independently confirm the melt without trusting
     this mint's word for it, per LUD-25's melt verify."""
+    if not settings.verify_enabled:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
     pr = notes.mint_pr(payment_hash)
     if pr is not None:
         return await _verify_response(payment_hash, pr, _mint_settled, _mint_preimage)
@@ -507,7 +522,16 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
         if HEX32_PATTERN.match(k1) and notes.note_spent(_note_id(k1)):
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
-    _, amount_msat = resolved
+    note_id, amount_msat = resolved
+    # a note reserved by an in-flight melt (NoteStore.mark_pending) must
+    # not be advertised as withdrawable: every mutating callback rejects
+    # it with reason "pending" per spec, so an informational endpoint
+    # claiming min=max=full value meanwhile would be lying - exactly the
+    # lie a sell-during-melt scam needs (buyer inspects /w, pays out of
+    # band, the melt settles, the note is gone). Same rejection shape as
+    # /w/cb's own, per the spec's distinct "pending" reason.
+    if notes.note_pending(note_id):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy) - same as
     # _pay_response/get_pay_callback
@@ -615,8 +639,9 @@ async def get_withdraw_callback(
 
         # LUD-25 melt verify: recorded unconditionally (see
         # NoteStore.record_melt), same as a mint invoice's own `pr` - the
-        # verify endpoint itself always works when hit directly, regardless
-        # of VERIFY_ENABLED, which only gates whether it's advertised below
+        # endpoint serves whatever was recorded while VERIFY_ENABLED is on
+        # and 404s while off (see verify_invoice), the setting also gating
+        # whether it's advertised below
         melt_verify_url = None
         if decoded.has_payment_hash:
             notes.record_melt(decoded.payment_hash, pr)

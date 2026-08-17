@@ -2,7 +2,7 @@ import os
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .node import LightningBackendConfig
@@ -42,11 +42,14 @@ class Settings(BaseSettings):
     # that already existed at boot; this catches one that develops later,
     # or a flaky one boot happened to catch mid-recovery. Only ever logs on
     # a state transition (became unreachable / recovered), never every tick.
-    funding_source_health_check_interval_seconds: int = 60
+    # ge=1: 0 would busy-loop getinfo against the node (server.py's monitor
+    # sleeps exactly this between probes).
+    funding_source_health_check_interval_seconds: int = Field(default=60, ge=1)
 
-    # bounds on the value of a single minted note (LUD-06 min/maxSendable)
-    min_sendable_msat: int = 10_000
-    max_sendable_msat: int = 1_000_000_000
+    # bounds on the value of a single minted note (LUD-06 min/maxSendable) -
+    # ordered relative to each other (validated below, after both are read)
+    min_sendable_msat: int = Field(default=10_000, ge=1)
+    max_sendable_msat: int = Field(default=1_000_000_000, ge=1)
 
     # LUD-25's optional mint fee: withheld from every minted note's value
     # (a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
@@ -54,15 +57,19 @@ class Settings(BaseSettings):
     # the note back out on melt. Advertised in /p/cb's payRequest metadata
     # (see router._pay_response) so a wallet can warn the payer up front -
     # omitted from metadata entirely (assumed fee-free per spec) when both
-    # are zero.
-    base_fee_msat: int = 1000
-    fee_percent_ppm: int = 0
+    # are zero. fee_percent_ppm is bounded well below 1_000_000 (100%): at
+    # or above that the fee can never leave a positive net amount, which
+    # sends router._min_sendable_msat's walk into a non-terminating loop -
+    # and even merely close to it, each /p request burns millions of loop
+    # iterations of CPU. 100_000 (10%) keeps the walk under ~100 steps.
+    base_fee_msat: int = Field(default=1000, ge=0)
+    fee_percent_ppm: int = Field(default=0, ge=0, le=100_000)
 
     # floor on a note's value net of the mint fee (not on `amount` itself,
     # which min_sendable_msat already bounds) - guards against minting
     # dust-value notes not worth the routing cost of ever melting them.
     # /p/cb rejects an `amount` that would net less than this after fees.
-    min_mint_msat: int = 10_000
+    min_mint_msat: int = Field(default=10_000, ge=0)
 
     # cap on the number of k1s a single /w/cb request (melt/rotate/split/
     # merge) may name - well above any real wallet's outstanding note count
@@ -73,10 +80,18 @@ class Settings(BaseSettings):
 
     database_path: str = "mint.db"
 
-    # LUD-21 (optional): advertise a `verify` URL in /p/cb's response, so a
-    # wallet with no node of its own can poll whether its invoice settled.
-    # On by default - see router.verify_invoice for why this mint never
-    # returns the spec's `preimage` field regardless of this setting.
+    # LUD-21 (optional): serve /verify/{payment_hash} and advertise a
+    # `verify` URL in /p/cb's (and a melt's) response, so a wallet with no
+    # node of its own can poll whether its invoice settled. Once settled,
+    # the response's `preimage` IS the freshly minted bearer note's spend
+    # secret (see router.verify_invoice) - served to ANY holder of the
+    # payment hash, which travels inside the invoice itself, so a wallet
+    # MUST rotate the note immediately after claiming it (LUD-25's
+    # Security considerations), and an operator unwilling to serve spend
+    # secrets to any invoice holder should turn this off. Unlike the
+    # ecosystem's usual convention, false here disables the endpoint
+    # entirely (404), not just its advertisement - precisely because the
+    # preimage is a bearer secret here, not mere proof of payment.
     verify_enabled: bool = True
 
     # the one-pager frontend (GET /)
@@ -122,6 +137,17 @@ class Settings(BaseSettings):
         if value is not None and not urlparse(value).hostname:
             raise ValueError(f"ONION_URL {value!r} has no hostname.")
         return value
+
+    @model_validator(mode="after")
+    def _sendable_bounds_are_ordered(self) -> "Settings":
+        """min_sendable_msat <= max_sendable_msat - inverted bounds would
+        make every /p/cb amount reject (too low AND too high at once),
+        better caught here at startup than by a wallet's first attempt."""
+        if self.min_sendable_msat > self.max_sendable_msat:
+            raise ValueError(
+                f"MIN_SENDABLE_MSAT ({self.min_sendable_msat}) exceeds MAX_SENDABLE_MSAT ({self.max_sendable_msat})."
+            )
+        return self
 
     def public_base_url(self, request_base_url: str) -> str:
         if self.onion_url:

@@ -159,6 +159,17 @@ class NoteStore:
         row = self.conn.execute("SELECT spent FROM notes WHERE id = ?", (note_id,)).fetchone()
         return bool(row and row[0])
 
+    def note_pending(self, note_id: str) -> bool:
+        """Whether `note_id` names an outstanding note currently reserved by
+        an in-flight melt (see mark_pending). Distinct from note_spent: the
+        note still exists and may return to circulation (restore), but right
+        now no callback may touch it - and the informational withdraw
+        endpoint must say so instead of advertising it as withdrawable (see
+        router.get_withdraw), which is exactly the lie a sell-during-melt
+        scam needs."""
+        row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
+        return bool(row and row[0])
+
     def swap(self, burn_ids: list[str], mint_note_ids: list[str], mint_amounts: list[int]) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,
@@ -170,10 +181,15 @@ class NoteStore:
         repeated (the second burn of a duplicate finds it spent by the
         first), or if any mint id collides with an existing note (a
         WALLET generating a fresh, unpredictable preimage each time
-        should never hit this honestly). Raises PendingNoteError instead
-        if any burn id is reserved by an in-flight melt (see
-        mark_pending): per the spec, that's a distinct "pending"
-        rejection, not a plain invalid/spent one."""
+        should never hit this honestly) OR with any invoice this mint
+        ever issued: a minted note's id IS its funding invoice's payment
+        hash (see settle_mint), so a WALLET-chosen id planted under a
+        *pending* invoice's payment hash would shadow that mint once paid
+        and then block settle_mint's INSERT under the same key forever -
+        bricking a paid mint for the price of a dust note. Raises
+        PendingNoteError instead if any burn id is reserved by an
+        in-flight melt (see mark_pending): per the spec, that's a
+        distinct "pending" rejection, not a plain invalid/spent one."""
         with self._lock:
             try:
                 with self.conn:
@@ -187,6 +203,11 @@ class NoteStore:
                             raise PendingNoteError("pending")
                         self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
                     for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
+                        if self.conn.execute("SELECT 1 FROM mints WHERE payment_hash = ?", (note_id,)).fetchone():
+                            # same known-safe message as any other invalid
+                            # id - which table it collided with is nobody's
+                            # business but the operator's
+                            raise ValueError("Invalid or already spent k1.")
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
             except sqlite3.Error as exc:
                 # exc's own text (raw sqlite3 error) is never handed back on
@@ -200,8 +221,9 @@ class NoteStore:
         burned and their own pending-melt bookkeeping (mark_pending/
         finalize_melt) is gone. Written unconditionally, the same way a
         mint invoice's `pr` is always stored regardless of VERIFY_ENABLED -
-        that setting only gates whether the callback response *advertises*
-        the verify URL, not whether hitting it directly works."""
+        recording is cheap and lets the endpoint simply serve whatever was
+        recorded while the setting is on (and 404 everything when off,
+        see router.verify_invoice)."""
         with self._lock, self.conn:
             self.conn.execute("INSERT OR IGNORE INTO melts (payment_hash, pr) VALUES (?, ?)", (payment_hash, pr))
 

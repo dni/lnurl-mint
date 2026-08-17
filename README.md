@@ -107,18 +107,34 @@ optional field, and signing failures (e.g. a briefly unreachable node) are
 swallowed rather than failing the rotate/split/merge itself.
 
 **Verify** (optional, [LUD-21](../luds/21.md)): set `VERIFY_ENABLED=true` to
-advertise a `verify` URL in `/p/cb`'s response, letting a wallet with no node
-of its own poll `/verify/{payment_hash}` for settlement status instead of
-watching the invoice itself. Once settled, the response's `preimage` *is* the
-freshly minted bearer note's spend secret (see [LUD-25](../luds/25.md)) -
-unlike a plain LUD-21 proof-of-payment, that wallet needs it to claim the note
-at all, so it must be handed over despite `SERVICE`'s own node already being a
-permanent prior holder of that same secret; the wallet MUST rotate the note
-immediately after (see LUD-25's Security considerations) rather than treat
-verify as having closed that exposure window. `preimage` is fetched live from the
-funding source on every call, never cached locally, same as every other
-secret this mint handles. `/verify/{payment_hash}` itself always works when
-hit directly; `VERIFY_ENABLED` only controls whether `/p/cb` advertises it.
+serve `/verify/{payment_hash}` and advertise a `verify` URL in `/p/cb`'s
+response, letting a wallet with no node of its own poll settlement status
+instead of watching the invoice itself. Once settled, the response's
+`preimage` *is* the freshly minted bearer note's spend secret (see
+[LUD-25](../luds/25.md)) - unlike a plain LUD-21 proof-of-payment, that
+wallet needs it to claim the note at all, so it must be handed over despite
+`SERVICE`'s own node already being a permanent prior holder of that same
+secret; the wallet MUST rotate the note immediately after (see LUD-25's
+Security considerations) rather than treat verify as having closed that
+exposure window. `preimage` is fetched live from the funding source on every
+call, never cached locally, same as every other secret this mint handles.
+Unlike the ecosystem's usual convention, `VERIFY_ENABLED=false` disables the
+endpoint entirely (404), not just its advertisement - precisely because the
+preimage is a bearer secret here, an operator who doesn't want it served
+gets a real off switch.
+
+**The observer race, plainly**: the payment hash `/verify` is keyed by
+travels inside the invoice itself, so *anyone* who sees an unpaid mint
+invoice (a QR on a public page, a screenshot, a forwarded payment request,
+wallet logs) can poll `/verify` and, the moment it settles, take the
+preimage and rotate the note onto their own secret - first rotater wins,
+no questions asked. A spec-compliant wallet rotates the instant its payment
+settles and wins that race by construction. The exposed flows are the ones
+that don't: manual ones (this README's own "enter the payment preimage
+into lnurl-wallet" flow is a human-speed window), custodial wallets that
+withhold preimages, and any invoice shared before payment. Don't put unpaid
+mint invoices anywhere public, and if you can't accept this exposure for
+your users, set `VERIFY_ENABLED=false`.
 
 The same flag extends a melt's own response the same way, per LUD-25: `pr`
 (the invoice this melt is paying, echoed back) and `verify` (a `/verify/`
