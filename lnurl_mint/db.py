@@ -159,6 +159,17 @@ class NoteStore:
         row = self.conn.execute("SELECT spent FROM notes WHERE id = ?", (note_id,)).fetchone()
         return bool(row and row[0])
 
+    def note_pending(self, note_id: str) -> bool:
+        """Whether `note_id` names an outstanding note currently reserved by
+        an in-flight melt (see mark_pending). Distinct from note_spent: the
+        note still exists and may return to circulation (restore), but right
+        now no callback may touch it - and the informational withdraw
+        endpoint must say so instead of advertising it as withdrawable (see
+        router.get_withdraw), which is exactly the lie a sell-during-melt
+        scam needs."""
+        row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
+        return bool(row and row[0])
+
     def swap(self, burn_ids: list[str], mint_note_ids: list[str], mint_amounts: list[int]) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,

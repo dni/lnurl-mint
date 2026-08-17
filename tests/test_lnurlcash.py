@@ -546,7 +546,11 @@ def test_undeterminable_payment_status_leaves_the_note_pending(client: TestClien
     node.is_payment_complete_raises = True
     pr = fake_invoice(5000)
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
-    assert note_value(client, k1) == 5000
+    # still outstanding (its value isn't lost) - probed at the store, since
+    # /w truthfully rejects a pending note with the spec's reason instead of
+    # advertising a value for it (see test_poc_f2_pending_info_leak.py)
+    assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
+    assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
 
@@ -572,7 +576,9 @@ def test_hodl_invoice_attack_leaves_the_note_pending_instead_of_restoring(
     node.is_payment_complete_raises = True
     pr = fake_invoice(5000)
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
-    assert note_value(client, k1) == 5000
+    # same as above: outstanding at the store, "pending" on the wire
+    assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
+    assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&h={h}").json() == {"status": "ERROR", "reason": "pending"}
 

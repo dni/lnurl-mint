@@ -507,7 +507,16 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
         if HEX32_PATTERN.match(k1) and notes.note_spent(_note_id(k1)):
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
-    _, amount_msat = resolved
+    note_id, amount_msat = resolved
+    # a note reserved by an in-flight melt (NoteStore.mark_pending) must
+    # not be advertised as withdrawable: every mutating callback rejects
+    # it with reason "pending" per spec, so an informational endpoint
+    # claiming min=max=full value meanwhile would be lying - exactly the
+    # lie a sell-during-melt scam needs (buyer inspects /w, pays out of
+    # band, the melt settles, the note is gone). Same rejection shape as
+    # /w/cb's own, per the spec's distinct "pending" reason.
+    if notes.note_pending(note_id):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy) - same as
     # _pay_response/get_pay_callback
