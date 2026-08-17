@@ -1,0 +1,132 @@
+{
+  lib,
+  python3,
+  fetchPypi,
+  makeWrapper,
+  src, # the flake root, passed in from flake.nix (self)
+}:
+
+let
+  python3Packages = python3.pkgs;
+
+  # not in nixpkgs (lnbits' BOLT11 codec) - pinned to the same version and
+  # hash as uv.lock. Its upstream `requires-python = ">=3.10,<3.13"` cap is
+  # conservative (the library runs fine on 3.13/3.14 - this repo's whole
+  # test suite passes against it), so it's relaxed here rather than
+  # failing nixpkgs' interpreter-version check.
+  bolt11 = python3Packages.buildPythonPackage rec {
+    pname = "bolt11";
+    version = "2.2.0";
+    pyproject = true;
+
+    src = fetchPypi {
+      inherit pname version;
+      hash = "sha256-Es2dDT6w8IxQWxg08hYwNpl0wd47nDm5q9SN3Q0aREs=";
+    };
+
+    postPatch = ''
+      sed -i 's/>=3.10,<3.13/>=3.10/' pyproject.toml
+    '';
+
+    build-system = [ python3Packages.hatchling ];
+
+    dependencies = with python3Packages; [
+      click
+      base58
+      coincurve
+      bech32
+      bitstring
+    ];
+
+    # upstream tests want pytest-cov and friends; skipped - this repo's own
+    # suite exercises bolt11 thoroughly (every fake invoice is one)
+    doCheck = false;
+
+    meta = {
+      description = "A library for encoding and decoding BOLT11 payment requests";
+      homepage = "https://github.com/lnbits/bolt11";
+      license = lib.licenses.mit;
+    };
+  };
+
+  # the runtime dependency set, as a function so the dev shell can reuse it
+  # (uvicorn's [standard] extras are spelled out individually - nixpkgs
+  # doesn't propagate extras)
+  runtimeDeps =
+    ps: with ps; [
+      fastapi
+      uvicorn
+      httptools
+      uvloop
+      watchfiles
+      websockets
+      pyyaml
+      python-dotenv
+      bolt11
+      httpx
+      pydantic-settings
+      qrcode
+      bech32
+      coincurve
+    ];
+in
+python3Packages.buildPythonApplication rec {
+  pname = "lnurl-mint";
+  version = "0.1.5";
+  pyproject = true;
+
+  inherit src;
+
+  # flake sources carry no .git for hatch-vcs to derive a version from
+  env.SETUPTOOLS_SCM_PRETEND_VERSION = version;
+
+  build-system = with python3Packages; [
+    hatchling
+    hatch-vcs
+  ];
+
+  dependencies = runtimeDeps python3Packages;
+
+  # nixpkgs ships fastapi 0.139 where pyproject pins <0.116.0 - relax the
+  # metadata bound and let the checkPhase's full test suite be the judge of
+  # compatibility (if it ever breaks, the honest fix is bumping the pin
+  # upstream, not hiding it here)
+  pythonRelaxDeps = [ "fastapi" ];
+
+  nativeBuildInputs = [ makeWrapper ];
+
+  # no [project.scripts] upstream - the app is served by uvicorn; wrap it so
+  # `nix run` and the NixOS module have a single entry point to exec. The
+  # wrapper captures the build-time PYTHONPATH (the full dependency closure)
+  # plus this package's own site-packages.
+  postInstall = ''
+    makeWrapper ${lib.getExe python3Packages.uvicorn} $out/bin/lnurl-mint \
+      --add-flags "lnurl_mint.server:app" \
+      --prefix PYTHONPATH : "$out/${python3.sitePackages}:$PYTHONPATH"
+  '';
+
+  nativeCheckInputs = [ python3Packages.pytest ];
+
+  # conftest.py isolates itself (throwaway sqlite, dummy dotenv, testserver
+  # BASE_URL, FakeNode) - the suite needs no network and no further setup.
+  # `python -m pytest` rather than the bare console script: the test modules
+  # do `from tests.conftest import ...`, which needs the repo root on
+  # sys.path, which only the -m form adds
+  checkPhase = ''
+    runHook preCheck
+    python -m pytest
+    runHook postCheck
+  '';
+
+  passthru = {
+    inherit bolt11 runtimeDeps;
+  };
+
+  meta = {
+    description = "Minimal lnurlcash (LUD-25, Lightning bearer assets) mint - LUD-03/LUD-06 only";
+    homepage = "https://github.com/dni/lnurl-mint";
+    license = lib.licenses.mit;
+    mainProgram = "lnurl-mint";
+    platforms = lib.platforms.linux;
+  };
+}
