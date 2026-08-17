@@ -83,6 +83,18 @@ def test_lightning_address_rejects_unknown_username(client: TestClient):
     assert data["status"] == "ERROR"
 
 
+def test_lightning_address_serves_the_reserved_bare_domain_username(client: TestClient):
+    # LUD-16: `_` is reserved for a bare-domain address (no visible user
+    # part) - answers for the exact same identity as settings.username,
+    # but text/identifier echoes back `_`, the name actually queried, not
+    # settings.username - a WALLET resolving `_@host` should see that
+    # confirmed, not a different-looking identity
+    data = client.get("/.well-known/lnurlp/_").json()
+    assert data["tag"] == "payRequest"
+    assert data["withdrawLink"] == "http://testserver/w"
+    assert '["text/identifier", "_@testserver"]' in data["metadata"]
+
+
 def test_mint_address_combines_withdraw_and_node_info(client: TestClient, node):
     data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
     assert data["tag"] == "withdrawRequest"
@@ -114,6 +126,14 @@ def test_mint_address_max_withdrawable_accounts_for_mint_fee(client: TestClient,
 def test_mint_address_rejects_unknown_username(client: TestClient):
     data = client.get("/.well-known/lnurlw/nobody").json()
     assert data["status"] == "ERROR"
+
+
+def test_mint_address_serves_the_reserved_bare_domain_username(client: TestClient, node):
+    data = client.get("/.well-known/lnurlw/_").json()
+    assert data["tag"] == "withdrawRequest"
+    # payLink still points at the canonical settings.username address - the
+    # `_` alias names the same identity, not a different one to advertise
+    assert data["payLink"] == f"http://testserver/.well-known/lnurlp/{settings.username}"
 
 
 def test_mint_address_without_funding_source(client: TestClient, monkeypatch):
