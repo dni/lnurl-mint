@@ -41,6 +41,13 @@ class NoteStore:
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(self.path, check_same_thread=False)
+            # wait up to 5s on a locked database instead of raising
+            # "database is locked" at once (sqlite's default). Only matters
+            # if a second process ever opens this same file (an operator
+            # inspecting it with the sqlite CLI, or someone ignoring the
+            # single-process rule in the README) - within this process all
+            # access is serialized above anyway.
+            self._conn.execute("PRAGMA busy_timeout = 5000")
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS notes ("
                 " id TEXT PRIMARY KEY,"  # sha256(k1), never the secret itself
