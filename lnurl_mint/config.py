@@ -73,10 +73,18 @@ class Settings(BaseSettings):
 
     database_path: str = "mint.db"
 
-    # LUD-21 (optional): advertise a `verify` URL in /p/cb's response, so a
-    # wallet with no node of its own can poll whether its invoice settled.
-    # On by default - see router.verify_invoice for why this mint never
-    # returns the spec's `preimage` field regardless of this setting.
+    # LUD-21 (optional): serve /verify/{payment_hash} and advertise a
+    # `verify` URL in /p/cb's (and a melt's) response, so a wallet with no
+    # node of its own can poll whether its invoice settled. Once settled,
+    # the response's `preimage` IS the freshly minted bearer note's spend
+    # secret (see router.verify_invoice) - served to ANY holder of the
+    # payment hash, which travels inside the invoice itself, so a wallet
+    # MUST rotate the note immediately after claiming it (LUD-25's
+    # Security considerations), and an operator unwilling to serve spend
+    # secrets to any invoice holder should turn this off. Unlike the
+    # ecosystem's usual convention, false here disables the endpoint
+    # entirely (404), not just its advertisement - precisely because the
+    # preimage is a bearer secret here, not mere proof of payment.
     verify_enabled: bool = True
 
     # the one-pager frontend (GET /)

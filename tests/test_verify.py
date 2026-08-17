@@ -21,7 +21,8 @@ def test_verify_url_advertised_when_enabled(client: TestClient, node, monkeypatc
     assert data["verify"] == f"http://testserver/verify/{payment_hash}"
 
 
-def test_verify_reports_unsettled_before_payment(client: TestClient, node):
+def test_verify_reports_unsettled_before_payment(client: TestClient, node, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
     data = client.get("/p/cb?amount=5000").json()
     payment_hash = sha256(node.last_preimage).hexdigest()
 
@@ -30,7 +31,8 @@ def test_verify_reports_unsettled_before_payment(client: TestClient, node):
     assert "preimage" not in result
 
 
-def test_verify_reports_settled_after_payment(client: TestClient, node):
+def test_verify_reports_settled_after_payment(client: TestClient, node, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
     data = client.get("/p/cb?amount=5000").json()
     payment_hash = sha256(node.last_preimage).hexdigest()
     node.settled.add(payment_hash)
@@ -39,7 +41,8 @@ def test_verify_reports_settled_after_payment(client: TestClient, node):
     assert result == {"status": "OK", "settled": True, "pr": data["pr"], "preimage": node.last_preimage.hex()}
 
 
-def test_verify_withholds_the_preimage_before_settlement(client: TestClient, node):
+def test_verify_withholds_the_preimage_before_settlement(client: TestClient, node, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
     # the payment preimage IS the bearer note's spend secret - it's only
     # handed over once settled, so an unsettled invoice's verify response
     # must not leak it even though the node already knows it
@@ -51,13 +54,15 @@ def test_verify_withholds_the_preimage_before_settlement(client: TestClient, nod
     assert "preimage" not in body
 
 
-def test_verify_unknown_payment_hash_is_not_found(client: TestClient):
+def test_verify_unknown_payment_hash_is_not_found(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
     bogus = "00" * 32
     result = client.get(f"/verify/{bogus}").json()
     assert result == {"status": "ERROR", "reason": "Not found"}
 
 
-def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, mint_note):
+def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, mint_note, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
     # LUD-21 verify answers "was this invoice ever paid", not "is there a
     # spendable note right now" - those diverge once the note is rotated,
     # but the preimage - fetched live from the node, never cached - is
@@ -77,14 +82,21 @@ def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, mint_n
     assert result["preimage"] == k1
 
 
-def test_verify_works_even_when_not_advertised(client: TestClient, node):
-    # VERIFY_ENABLED only controls whether /p/cb *advertises* the URL, not
-    # whether the endpoint itself responds when hit directly
+def test_verify_endpoint_is_disabled_entirely_when_verify_enabled_is_false(client: TestClient, node):
+    # VERIFY_ENABLED=false is a real off switch, not just a hidden URL:
+    # the endpoint 404s even when hit directly with a known payment_hash -
+    # deliberately unlike the usual LUD-21 convention, because for a mint
+    # the settled response's preimage IS the bearer note's spend secret
+    # (see router.verify_invoice), so an operator unwilling to serve it to
+    # any invoice holder can turn it off for good
     assert settings.verify_enabled is False
     data = client.get("/p/cb?amount=5000").json()
     assert "verify" not in data
     payment_hash = sha256(node.last_preimage).hexdigest()
-    assert client.get(f"/verify/{payment_hash}").json()["settled"] is False
+    assert client.get(f"/verify/{payment_hash}").json() == {"status": "ERROR", "reason": "Not found"}
+    # ...even after settlement, when the preimage would be served
+    node.settled.add(payment_hash)
+    assert client.get(f"/verify/{payment_hash}").json() == {"status": "ERROR", "reason": "Not found"}
 
 
 def test_melt_response_carries_no_verify_by_default(client: TestClient, node, mint_note):
@@ -139,10 +151,10 @@ def test_melt_verify_reports_unsettled_before_the_payment_completes(client: Test
     assert "preimage" not in result
 
 
-def test_melt_verify_works_even_when_not_advertised(client: TestClient, node, mint_note):
-    # same convention as the mint side's verify_invoice: VERIFY_ENABLED only
-    # gates whether the callback response advertises the URL, not whether
-    # hitting it directly works
+def test_melt_verify_is_also_disabled_when_verify_enabled_is_false(client: TestClient, node, mint_note):
+    # the same off switch covers the melt direction: the melts row is still
+    # recorded (cheap, and the endpoint simply serves recordings while on),
+    # but /verify 404s regardless
     assert settings.verify_enabled is False
     k1 = mint_note(5000)
     pr = fake_invoice(5000)
@@ -151,7 +163,7 @@ def test_melt_verify_works_even_when_not_advertised(client: TestClient, node, mi
     assert "verify" not in data
 
     payment_hash = bolt11.decode(pr).payment_hash
-    assert client.get(f"/verify/{payment_hash}").json()["settled"] is True
+    assert client.get(f"/verify/{payment_hash}").json() == {"status": "ERROR", "reason": "Not found"}
 
 
 def test_mints_table_migrates_from_before_lud21(tmp_path):

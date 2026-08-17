@@ -221,8 +221,9 @@ class NoteStore:
         burned and their own pending-melt bookkeeping (mark_pending/
         finalize_melt) is gone. Written unconditionally, the same way a
         mint invoice's `pr` is always stored regardless of VERIFY_ENABLED -
-        that setting only gates whether the callback response *advertises*
-        the verify URL, not whether hitting it directly works."""
+        recording is cheap and lets the endpoint simply serve whatever was
+        recorded while the setting is on (and 404 everything when off,
+        see router.verify_invoice)."""
         with self._lock, self.conn:
             self.conn.execute("INSERT OR IGNORE INTO melts (payment_hash, pr) VALUES (?, ?)", (payment_hash, pr))
 
