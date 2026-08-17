@@ -236,6 +236,56 @@ Prefer real network isolation? Drop `--network host` and use `-p
 <host-port>:8111` instead, same as any other container. Front it with a
 reverse proxy for TLS if it's reachable from the internet.
 
+## Nix
+
+The flake provides the package, a dev shell, and a NixOS module:
+
+```sh
+nix build                              # builds the app, running the full test suite
+nix run                                # serves via uvicorn (needs BASE_URL, see below)
+nix develop                            # python + all deps + pinned test/lint tooling
+                                       # (coincurve prebuilt from nixpkgs - no venv,
+                                       # no sdist builds); run pytest against the tree
+nix flake check                        # package + module eval + a VM smoke test
+```
+
+On NixOS, run the mint as a hardened systemd service:
+
+```nix
+{
+  inputs.lnurl-mint.url = "github:dni/lnurl-mint";
+
+  outputs = { nixpkgs, lnurl-mint, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        lnurl-mint.nixosModules.lnurl-mint
+        {
+          services.lnurl-mint = {
+            enable = true;
+            settings = {
+              BASE_URL = "https://mint.example.com";
+              FUNDINGSOURCE_BACKEND = "cln";
+              FUNDINGSOURCE_URL = "https://localhost:3010";
+            };
+            # secrets stay out of the nix store - this file carries
+            # FUNDINGSOURCE_RUNE (or FUNDINGSOURCE_MACAROON for lnd)
+            environmentFiles = [ "/run/secrets/lnurl-mint" ];
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+The service runs with a dynamic user and a locked-down sandbox
+(`ProtectSystem=strict`, `NoNewPrivileges`, restricted address families,
+...), state in `/var/lib/lnurl-mint` (mode 0750 - mint.db and the logs hold
+payment hashes and amounts). `BASE_URL` is required, by assertion at eval
+time. The module composes with the rest of your node config the way you'd
+expect - point `FUNDINGSOURCE_URL` at your clnrest/lnd REST and scope the
+rune/macaroon as described above.
+
 ## Test
 
 ```sh
