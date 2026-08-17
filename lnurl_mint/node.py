@@ -1,4 +1,5 @@
 import json
+import re
 import ssl
 from base64 import b64decode, b64encode
 from hashlib import sha256
@@ -568,20 +569,34 @@ async def _payment_preimage_cln(payment_hash: str, url: str, rune: str, config: 
 
 class NodeInfo(BaseModel):
     """This mint's own funding-source node identity, shown on the one-pager
-    frontend (GET /)."""
+    frontend (GET /) and advertised on the mint-address discovery endpoint
+    (see router.get_mint_address)."""
 
     alias: str | None = None
     uri: str | None = None  # node_key@host:port, or the bare pubkey if unannounced
     color: str | None = None  # "#rrggbb", the node's self-reported display color
     num_channels: int = 0
     num_peers: int = 0
+    capacity_msat: int = 0  # sum of this node's own channels' total capacity
+
+
+_HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
 
 
 def _normalize_color(color: str | None) -> str | None:
     """lnd's getinfo already prefixes its `color` with '#'; cln's doesn't -
-    normalized to a single "#rrggbb" form so the frontend can use it
-    directly as a CSS color without caring which backend it came from."""
-    return f"#{color.lstrip('#')}" if color else None
+    normalized to a single "#rrggbb" form so every consumer (the frontend's
+    CSS, the mint-address discovery response) can use it directly without
+    caring which backend it came from. Also validated here, once, at the
+    source: NodeInfo.color is either a well-formed "#rrggbb" or None,
+    never anything a consumer would have to sanity-check itself before
+    trusting - frontend.py in particular substitutes this straight into a
+    style attribute unescaped, so a malformed value (or one containing
+    stray characters) must never get this far in the first place."""
+    if not color:
+        return None
+    normalized = f"#{color.lstrip('#')}"
+    return normalized if _HEX_COLOR_RE.fullmatch(normalized) else None
 
 
 async def fetch_node_info(config: LightningBackendConfig) -> NodeInfo:
@@ -592,11 +607,32 @@ async def fetch_node_info(config: LightningBackendConfig) -> NodeInfo:
 
 async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackendConfig) -> NodeInfo:
     """lnd's REST GetInfo - `uris` are already fully-formed "pubkey@host:port"
-    strings, empty when the node has no announced address configured."""
+    strings, empty when the node has no announced address configured.
+    Capacity isn't part of GetInfo itself, so it's a second call, but
+    deliberately GetNodeInfo (self-lookup by pubkey) rather than
+    ListChannels: GetNodeInfo answers from lnd's public graph cache, the
+    same total_capacity number any stranger on the network could already
+    derive from this node's own announced channel_announcements - unlike
+    ListChannels, it can't be used to enumerate this node's private/
+    unannounced channels or their individual balances, so it costs no
+    privacy this node's public presence doesn't already give away. Best
+    effort: a failure there (e.g. an unannounced node with nothing in the
+    graph yet) is swallowed rather than failing the whole getinfo, since
+    capacity is purely informational."""
+    headers = {"Grpc-Metadata-macaroon": macaroon}
     async with httpx.AsyncClient(verify=config.verify) as client:
-        res = await client.get(f"{url}/v1/getinfo", headers={"Grpc-Metadata-macaroon": macaroon})
+        res = await client.get(f"{url}/v1/getinfo", headers=headers)
         await _raise_for_status(res)
         info = res.json()
+        capacity_msat = 0
+        pubkey = info.get("identity_pubkey")
+        if pubkey:
+            try:
+                node_res = await client.get(f"{url}/v1/graph/node/{pubkey}", headers=headers)
+                await _raise_for_status(node_res)
+                capacity_msat = int(node_res.json().get("total_capacity", 0)) * 1000
+            except Exception:
+                pass
     uris = info.get("uris") or []
     return NodeInfo(
         alias=info.get("alias") or None,
@@ -604,16 +640,45 @@ async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackend
         color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),
+        capacity_msat=capacity_msat,
     )
 
 
 async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConfig) -> NodeInfo:
-    """Core Lightning's clnrest plugin GetInfo."""
+    """Core Lightning's clnrest plugin GetInfo. Capacity isn't part of
+    getinfo either, so it's a second call, but deliberately listchannels
+    filtered to `source=<our own id>` rather than listfunds: listchannels
+    answers from cln's public gossip store, the same channel_announcements
+    any peer on the network already sees, unlike listfunds - which is this
+    node's own private view of its channels, including unannounced ones
+    and their exact local/remote balance split. A public channel gets one
+    listchannels entry per direction (two channel_update messages sharing
+    one capacity), so entries are deduplicated by short_channel_id before
+    summing - counting both would double the real total. Best effort: a
+    failure here (e.g. a node with nothing announced yet) is swallowed
+    rather than failing the whole getinfo, since capacity is purely
+    informational."""
+    headers = {"Rune": rune}
     async with httpx.AsyncClient(verify=config.verify) as client:
-        res = await client.post(f"{url}/v1/getinfo", headers={"Rune": rune})
+        res = await client.post(f"{url}/v1/getinfo", headers=headers)
         await _raise_for_status(res)
         info = res.json()
-    node_id = info.get("id")
+        capacity_msat = 0
+        node_id = info.get("id")
+        if node_id:
+            try:
+                channels_res = await client.post(f"{url}/v1/listchannels", headers=headers, json={"source": node_id})
+                await _raise_for_status(channels_res)
+                channels = channels_res.json().get("channels") or []
+                seen_scids: set[str] = set()
+                for c in channels:
+                    scid = c.get("short_channel_id")
+                    if scid is None or scid in seen_scids:
+                        continue
+                    seen_scids.add(scid)
+                    capacity_msat += int(c.get("amount_msat", 0))
+            except Exception:
+                pass
     uri = node_id
     addresses = info.get("address") or []
     if node_id and addresses and addresses[0].get("address") and addresses[0].get("port"):
@@ -624,6 +689,7 @@ async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConf
         color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),
+        capacity_msat=capacity_msat,
     )
 
 

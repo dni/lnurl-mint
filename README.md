@@ -16,13 +16,14 @@ a reference wallet implementation (hosted at
 
 | Endpoint        | Role                                                                          |
 |-----------------|-------------------------------------------------------------------------------|
-| `GET /`         | one-pager frontend: mint QR code (LNURL of `/p`), lightning address, node info |
+| `GET /`         | one-pager frontend: mint QR code (LNURL of `/p`), lightning address, mint limits, node info incl. capacity |
 | `GET /p`      | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement)      |
 | `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
 | `GET /w` | LUD-03 withdrawRequest for a note (`?k1=`), informational, never burns       |
 | `GET /w/cb` | the mutating callback: melt (`pr`), rotate, split (`amount`), merge (many `k1`) |
 | `GET /.well-known/lnurlp/{username}` | LUD-16 alias for `/p`, the mint is payable at `{USERNAME}@{BASE_URL host}` |
+| `GET /.well-known/lnurlw/{username}` | **Theoretical/experimental**: withdraw-side mirror of the LUD-16 address - informational only, see below |
 
 Callback semantics (`/w/cb`):
 
@@ -148,6 +149,39 @@ melt's is never a bearer secret - the note(s) that funded it are already
 burned by the time it's returned - so there's no analogous rotate-immediately
 requirement here.
 
+**Mint address** (theoretical, experimental): `GET
+/.well-known/lnurlw/{username}` is the withdraw-side mirror of the LUD-16
+lightning address (`/.well-known/lnurlp/{username}`) - same `{username}`,
+same unknown-user 404, but on the withdraw side instead of pay. There is
+**no LUD number for this** and it is **not a functional LUD-03
+withdrawRequest**: this mint only ever custodies bearer notes, never
+per-user accounts, so there is no balance behind `{username}` for anyone
+to actually withdraw - unlike `/w`, its response carries no `k1`. It exists
+purely so a wallet or directory resolving `{username}@{host}` on its
+withdraw side learns something useful instead of a bare 404: this mint's
+own node identity (alias, color, capacity - see below),
+`minWithdrawable`/`maxWithdrawable` mirroring the amount bounds a freshly
+minted note can fall into (`MIN_MINT_MSAT`/`MAX_SENDABLE_MSAT`), and
+`payLink` pointing back at `/p` - completing the loop `/p`'s own
+`withdrawLink` starts. `callback` points at the real `/w` for LUD-03 shape
+symmetry, but with no `k1` to append, calling it yields nothing more than
+`/w`'s own "Unknown note" - never a way to draw on this mint's funds.
+
+**Capacity**: `NodeInfo.capacity_msat` (frontend one-pager and the mint
+address response above) is this node's total announced channel capacity -
+not part of either backend's plain getinfo, so it costs a second call
+alongside it, deliberately sourced from the *public* graph rather than a
+private view of this node's own channels: lnd's `GET
+/v1/graph/node/{pubkey}` (self-lookup, `total_capacity`) and cln's
+`listchannels` filtered to `source=<own id>`, the same
+`total_capacity`/`channel_announcement`s any other node on the network
+already sees. Neither can be used to read this node's own private/
+unannounced channels or their local/remote balance split the way
+`ListChannels`/`listfunds` could - the number reported here is never more
+than what this node's public presence already gives away. Best effort: a
+node with nothing announced in the graph yet simply reports `0` rather
+than failing the whole node lookup.
+
 **Tor**: set `ONION_URL` to this mint's hidden service address (e.g.
 `http://<v3-address>.onion`) to advertise it on the frontend one-pager as an
 alternative way to reach the mint, alongside its clearnet QR/address. This
@@ -173,27 +207,36 @@ Without one, minting and melting are unavailable (rotate/split/merge of existing
 notes still work).
 
 **cln rune**: this mint only ever calls `invoice`, `xpay`, `signmessage`,
-`listinvoices`, `listpays` and `getinfo` (see `node.py`), so scope
-`FUNDINGSOURCE_RUNE` to just those instead of handing it a full-access rune:
+`listinvoices`, `listpays`, `getinfo` and `listchannels` (see `node.py`) -
+`listchannels` reads the *public* gossip store (for `capacity_msat`, see
+above), never this node's own private `listfunds` view - so scope
+`FUNDINGSOURCE_RUNE` to just those instead of handing it a full-access
+rune:
 
 ```sh
-lightning-cli createrune restrictions='[["method=invoice","method=xpay","method=signmessage","method=listinvoices","method=listpays","method=getinfo"]]'
+lightning-cli createrune restrictions='[["method=invoice","method=xpay","method=signmessage","method=listinvoices","method=listpays","method=getinfo","method=listchannels"]]'
 ```
 
 The command's JSON output's `rune` field is the value for `FUNDINGSOURCE_RUNE`.
-The single `[...]` restriction is an OR list (any of these six methods, and
+The single `[...]` restriction is an OR list (any of these seven methods, and
 nothing else) - a comma-separated top-level list instead would AND further
 restrictions on top (e.g. `pnum=0` to also disallow all requests with
 parameters).
 
 **lnd macaroon**: `admin.macaroon` works, but this mint only ever calls
 `AddInvoice`/`LookupInvoice`, the router's `SendPaymentV2`/`TrackPaymentV2`,
-`SignMessage`, and `GetInfo` (see `node.py`) - scope `FUNDINGSOURCE_MACAROON`
-to just those instead of handing it full admin access:
+`SignMessage`, `GetInfo` and `GetNodeInfo` (see `node.py`) - scope
+`FUNDINGSOURCE_MACAROON` to just those instead of handing it full admin
+access:
 
 ```sh
 lncli bakemacaroon invoices:write invoices:read offchain:write offchain:read message:write info:read --save_to=lnurl-mint.macaroon
 ```
+
+`info:read` (already included above for `GetInfo`) also covers
+`GetNodeInfo` (a public-graph lookup, used for `capacity_msat` - see
+above), so no extra permission is needed beyond what this mint already
+requires.
 
 Set `FUNDINGSOURCE_MACAROON` to the hex-encoded contents of that file
 (`xxd -p -c1000 lnurl-mint.macaroon`, or drop `--save_to` to have `lncli`

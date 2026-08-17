@@ -1,5 +1,4 @@
 import html
-import re
 from pathlib import Path
 from string import Template
 from urllib.parse import urlparse
@@ -32,9 +31,6 @@ def lnurl_encode(url: str) -> str:
 def _qr_svg(data: str) -> str:
     image = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage, border=2)
     return image.to_string(encoding="unicode")
-
-
-_HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
 
 
 def _contrast_text_color(hex_color: str) -> str:
@@ -123,6 +119,8 @@ $theme_color_meta
     &mdash; enter the mint's lightning address (<code>$address</code>) and the payment preimage.
   </p>
   $tor_section
+  <h2>Mint</h2>
+  $limits_section
   <h2>Node</h2>
   $node_section
   <footer>
@@ -162,6 +160,14 @@ NODE_SECTION = Template(
     <tr><td>Connect string</td><td class="mono value-row"><span>$connect_string</span>$connect_copy</td></tr>
     <tr><td>Channels</td><td class="mono">$num_channels</td></tr>
     <tr><td>Peers</td><td class="mono">$num_peers</td></tr>
+    <tr><td>Capacity</td><td class="mono">$capacity</td></tr>
+  </table>"""
+)
+
+LIMITS_SECTION = Template(
+    """<table>
+    <tr><td>Min amount</td><td class="mono">$min_amount</td></tr>
+    <tr><td>Max amount</td><td class="mono">$max_amount</td></tr>
   </table>"""
 )
 
@@ -199,6 +205,22 @@ def _copy_button(value: str | None, title: str) -> str:
     return COPY_SM.substitute(value=html.escape(value), title=title)
 
 
+def _format_sats(amount_msat: int) -> str:
+    return f"{amount_msat // 1000:,} sats"
+
+
+def _limits_section() -> str:
+    """The Mint table's HTML: the amount bounds a freshly minted note can
+    fall into - min_mint_msat (the floor a note's value must clear net of
+    fees) and max_sendable_msat (the ceiling on what /p/cb accepts), the
+    same two settings advertised on the mint-address discovery endpoint
+    (see router.get_mint_address)."""
+    return LIMITS_SECTION.substitute(
+        min_amount=_format_sats(settings.min_mint_msat),
+        max_amount=_format_sats(settings.max_sendable_msat),
+    )
+
+
 async def _node_section() -> tuple[str, str | None]:
     """Returns the Node table's HTML, plus its validated `#rrggbb` color (if
     any) - the latter reused by index() for the page's <head> theme-color
@@ -216,7 +238,10 @@ async def _node_section() -> tuple[str, str | None]:
     # split so the pubkey and the full connect string each get their own row.
     pubkey, _, host = (node.uri or "").partition("@")
     connect_string = node.uri if host else None
-    color = node.color if node.color and _HEX_COLOR_RE.fullmatch(node.color) else None
+    # node.color is already validated as a well-formed "#rrggbb" or None
+    # by node._normalize_color - substituted into the style attribute below
+    # unescaped, so nothing malformed can reach this point in the first place
+    color = node.color
     color_row = COLOR_ROW.substitute(color=color, text_color=_contrast_text_color(color)) if color else ""
     section = NODE_SECTION.substitute(
         alias=html.escape(node.alias or "-"),
@@ -227,6 +252,7 @@ async def _node_section() -> tuple[str, str | None]:
         connect_copy=_copy_button(connect_string, "Copy connect string"),
         num_channels=node.num_channels,
         num_peers=node.num_peers,
+        capacity=_format_sats(node.capacity_msat),
     )
     return section, color
 
@@ -253,6 +279,7 @@ async def index(req: Request) -> HTMLResponse:
         address=html.escape(address),
         tor_section=_tor_section(base),
         theme_color_meta=theme_color_meta,
+        limits_section=_limits_section(),
         node_section=node_section,
         version=html.escape(__version__),
     )

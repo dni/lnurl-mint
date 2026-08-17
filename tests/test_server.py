@@ -1,12 +1,32 @@
 import logging
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 import lnurl_mint.server as server_module
 from lnurl_mint.config import settings
 from lnurl_mint.node import NodeInfo
 from lnurl_mint.server import app
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/p",
+        "/w?k1=" + "11" * 32,
+        f"/.well-known/lnurlp/{settings.username}",
+        f"/.well-known/lnurlw/{settings.username}",
+    ],
+)
+def test_wire_endpoints_are_reachable_cross_origin(client: TestClient, path: str):
+    # CORSMiddleware wraps the whole app in server.py, so every route
+    # registered on `router` (regardless of when it was added) is already
+    # covered - this pins that down for the new mint-address endpoint too,
+    # since every LNURL wire endpoint here is meant to be fetched by
+    # arbitrary third-party wallets, none of which share this origin
+    response = client.get(path, headers={"Origin": "https://wallet.example"})
+    assert response.headers["access-control-allow-origin"] == "*"
 
 
 def test_startup_disables_the_uvicorn_access_logger():

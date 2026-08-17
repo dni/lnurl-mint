@@ -81,3 +81,40 @@ def test_lightning_address_serves_the_pay_request(client: TestClient):
 def test_lightning_address_rejects_unknown_username(client: TestClient):
     data = client.get("/.well-known/lnurlp/nobody").json()
     assert data["status"] == "ERROR"
+
+
+def test_mint_address_combines_withdraw_and_node_info(client: TestClient, node):
+    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
+    assert data["tag"] == "withdrawRequest"
+    assert data["callback"] == "http://testserver/w"
+    assert data["payLink"] == "http://testserver/p"
+    assert data["minWithdrawable"] == settings.min_mint_msat
+    assert data["maxWithdrawable"] == settings.max_sendable_msat
+    assert data["nodeAlias"] == "fakenode"
+    assert data["nodeUri"] == f"{node.pubkey}@127.0.0.1:9735"
+    assert data["nodeColor"] == "#3399ff"
+    assert data["nodeCapacityMsat"] == 750_000_000
+    assert data["mintPubkey"] == node.pubkey
+    # theoretical/informational only - no real note k1 backs this address
+    assert "k1" not in data
+
+
+def test_mint_address_rejects_unknown_username(client: TestClient):
+    data = client.get("/.well-known/lnurlw/nobody").json()
+    assert data["status"] == "ERROR"
+
+
+def test_mint_address_without_funding_source(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "fundingsource_backend", None)
+    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
+    assert data["tag"] == "withdrawRequest"
+    assert data["payLink"] == "http://testserver/p"
+    assert "nodeAlias" not in data
+    assert "mintPubkey" not in data
+
+
+def test_index_shows_capacity_and_mint_limits(client: TestClient, node):
+    response = client.get("/")
+    assert "750,000 sats" in response.text
+    assert f"{settings.min_mint_msat // 1000:,} sats" in response.text
+    assert f"{settings.max_sendable_msat // 1000:,} sats" in response.text

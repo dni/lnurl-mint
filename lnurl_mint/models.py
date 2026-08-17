@@ -77,6 +77,36 @@ class LnurlWithdrawResponse(BaseModel):
     mintPubkey: str | None = None
 
 
+class LnurlMintAddressResponse(BaseModel):
+    """Theoretical companion to LUD-16 lnaddress (get_lnaddress): advertised
+    at .well-known/lnurlw/{username}, this is the withdraw-side mirror of
+    the mint's payRequest identity, completing the loop that
+    LnurlPayResponse.withdrawLink starts. There's no k1 and no real balance
+    behind `{username}` to draw from - this mint only ever custodies bearer
+    notes, never per-user accounts (see README) - so unlike `/w`, this is
+    purely informational: this mint's own node identity/capacity (see
+    node.NodeInfo) plus the amount bounds a freshly minted note can fall
+    into, and `payLink` (this mint's own LUD-16 address) so a wallet that
+    resolves mint@host on its withdraw side still finds its way back to
+    actually minting a note. `callback` points at the real `/w` withdraw
+    endpoint for symmetry with LUD-03's shape, but with no k1 to append a
+    wallet gets nothing more than "Unknown note" there - never a way to
+    draw on this mint's own funds."""
+
+    tag: Literal["withdrawRequest"] = "withdrawRequest"
+    callback: str
+    k1: str | None = None
+    minWithdrawable: int
+    maxWithdrawable: int
+    defaultDescription: str = ""
+    mintPubkey: str | None = None
+    payLink: str
+    nodeAlias: str | None = None
+    nodeUri: str | None = None
+    nodeColor: str | None = None
+    nodeCapacityMsat: int | None = None
+
+
 class WithdrawSuccessResponse(BaseModel):
     """LUD-03 success response, extended per LUD-25 (see
     router.get_withdraw_callback for the full melt/rotate/split/merge
