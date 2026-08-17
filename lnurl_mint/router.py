@@ -328,11 +328,17 @@ def _min_sendable_msat() -> int:
     settings.min_sendable_msat when it doesn't clear that net floor means
     paying the advertised minimum always bounces, so this walks amount up
     from the higher of the two configured floors until its net clears
-    min_mint_msat too."""
+    min_mint_msat too. Bounded defensively: fee_percent_ppm is validated
+    to stay well below 100% (see config.py), which guarantees the walk
+    terminates quickly - the cap turns any future regression of that
+    guarantee into a loud error at request time rather than a worker
+    spinning at 100% CPU for the process's lifetime."""
     amount_msat = max(settings.min_sendable_msat, settings.min_mint_msat)
-    while amount_msat - _mint_fee_msat(amount_msat) < settings.min_mint_msat:
+    for _ in range(100_000):
+        if amount_msat - _mint_fee_msat(amount_msat) >= settings.min_mint_msat:
+            return amount_msat
         amount_msat += 1000
-    return amount_msat
+    raise RuntimeError("minSendable walk did not terminate - check the fee settings (fee_percent_ppm too high?)")
 
 
 def _melt_fee_limit_msat(amount_msat: int) -> int:
