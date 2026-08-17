@@ -170,10 +170,15 @@ class NoteStore:
         repeated (the second burn of a duplicate finds it spent by the
         first), or if any mint id collides with an existing note (a
         WALLET generating a fresh, unpredictable preimage each time
-        should never hit this honestly). Raises PendingNoteError instead
-        if any burn id is reserved by an in-flight melt (see
-        mark_pending): per the spec, that's a distinct "pending"
-        rejection, not a plain invalid/spent one."""
+        should never hit this honestly) OR with any invoice this mint
+        ever issued: a minted note's id IS its funding invoice's payment
+        hash (see settle_mint), so a WALLET-chosen id planted under a
+        *pending* invoice's payment hash would shadow that mint once paid
+        and then block settle_mint's INSERT under the same key forever -
+        bricking a paid mint for the price of a dust note. Raises
+        PendingNoteError instead if any burn id is reserved by an
+        in-flight melt (see mark_pending): per the spec, that's a
+        distinct "pending" rejection, not a plain invalid/spent one."""
         with self._lock:
             try:
                 with self.conn:
@@ -187,6 +192,11 @@ class NoteStore:
                             raise PendingNoteError("pending")
                         self.conn.execute("UPDATE notes SET spent = 1 WHERE id = ?", (note_id,))
                     for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
+                        if self.conn.execute("SELECT 1 FROM mints WHERE payment_hash = ?", (note_id,)).fetchone():
+                            # same known-safe message as any other invalid
+                            # id - which table it collided with is nobody's
+                            # business but the operator's
+                            raise ValueError("Invalid or already spent k1.")
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
             except sqlite3.Error as exc:
                 # exc's own text (raw sqlite3 error) is never handed back on
