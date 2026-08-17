@@ -159,6 +159,19 @@ class NoteStore:
         row = self.conn.execute("SELECT spent FROM notes WHERE id = ?", (note_id,)).fetchone()
         return bool(row and row[0])
 
+    def note_status(self, note_id: str) -> tuple[int, bool, bool] | None:
+        """(amount_msat, spent, pending) for `note_id` if this mint ever
+        issued it, else None.
+
+        note_amount answers only "is there a spendable note right now", so
+        it collapses three different situations into None: never issued,
+        burned, and reserved by an in-flight melt (see mark_pending). Those
+        are what a holder needs told apart - "not mine to spend yet" is not
+        "gone". Burned rows are kept (see the class docstring), so None here
+        means this mint never issued the note, not that it has been spent."""
+        row = self.conn.execute("SELECT amount_msat, spent, pending FROM notes WHERE id = ?", (note_id,)).fetchone()
+        return (row[0], bool(row[1]), bool(row[2])) if row else None
+
     def swap(self, burn_ids: list[str], mint_note_ids: list[str], mint_amounts: list[int]) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,

@@ -66,7 +66,20 @@ class LnurlWithdrawResponse(BaseModel):
 
     `mintPubkey` (LUD-25 Offline verification, optional) is this mint's
     signing key - omitted entirely if no funding source is configured
-    (see signing.mint_pubkey)."""
+    (see signing.mint_pubkey).
+
+    `pending` is sent only while an in-flight melt has this note reserved
+    (NoteStore.mark_pending). The note is real and worth what min/max
+    Withdrawable say, but every mutating callback naming it fails with reason
+    "pending" until that melt resolves, which a WALLET otherwise has no way to
+    see coming: it reads a perfectly healthy note here and then gets a bare
+    error from the callback, with nothing connecting the two. Note that
+    router._melt_pay also leaves a note reserved indefinitely when an outcome
+    cannot be established either way, awaiting an operator - so this field
+    means "reserved", not "resolving shortly", and it is the only signal a
+    holder has that a frozen note is frozen. Omitted rather than sent as
+    `false` for an unreserved note, so the response for one is byte-identical
+    to before this field existed."""
 
     tag: Literal["withdrawRequest"] = "withdrawRequest"
     callback: str
@@ -75,6 +88,7 @@ class LnurlWithdrawResponse(BaseModel):
     maxWithdrawable: int
     defaultDescription: str = ""
     mintPubkey: str | None = None
+    pending: bool | None = None
 
 
 class WithdrawSuccessResponse(BaseModel):

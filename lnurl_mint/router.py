@@ -507,7 +507,16 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
         if HEX32_PATTERN.match(k1) and notes.note_spent(_note_id(k1)):
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
-    _, amount_msat = resolved
+    note_id, amount_msat = resolved
+    # An in-flight melt has this note reserved: it is real and worth what's
+    # reported below, but every mutating callback naming it fails with
+    # "pending" until that melt resolves (see NoteStore.mark_pending), and
+    # _melt_pay may leave it reserved indefinitely awaiting an operator. True
+    # or omitted, never False, so an unreserved note's response is unchanged.
+    # _resolve_note only succeeds once the row exists, so this is a plain
+    # store read - no lazy settle, and no second funding-source round trip.
+    status = notes.note_status(note_id)
+    pending = True if status is not None and status[2] else None
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy) - same as
     # _pay_response/get_pay_callback
@@ -519,6 +528,7 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
         maxWithdrawable=amount_msat,
         defaultDescription=f"lnurlcash bearer note on {host}",
         mintPubkey=await mint_pubkey(settings.funding_source()),
+        pending=pending,
     )
 
 

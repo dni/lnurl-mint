@@ -63,7 +63,18 @@ resolves, at which point the note is either burned for good (payment settled)
 or released back to outstanding (payment confirmed failed). Since the initial
 response is sent before the payment is even attempted, a melt failure is never
 reported back through this callback - only observable as the note becoming
-spendable again.
+spendable again. While that reservation is held, `GET /w` reports the note with
+`pending: true` alongside its unchanged value, so a `WALLET` can tell the three
+outcomes apart from that one endpoint: reserved (`pending`), settled (the note
+answers "Note already spent."), or failed (the note is simply spendable again).
+Without it a wallet reads a perfectly healthy note there and then gets a bare
+`"pending"` from the callback, with nothing connecting the two. Note that
+`_melt_pay` also leaves a note reserved indefinitely when an outcome cannot be
+established either way, awaiting an operator to resolve it by hand - `pending`
+means "reserved", not "resolving shortly", and it is the only signal a holder
+has that such a note is frozen rather than spendable. The field is sent only
+when true, never as `false`, so an unreserved note's response is exactly what
+it was before.
 
 No spendable secret is ever persisted or, for a rotate/split/merge, even seen
 by this mint at all: notes are stored keyed by `sha256(k1)` - `h`/`h2` above,
