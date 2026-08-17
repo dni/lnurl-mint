@@ -56,6 +56,11 @@ def test_pay_callback_enforces_sendable_bounds(client: TestClient):
     assert client.get("/p/cb?amount=999999999999").json()["status"] == "ERROR"
 
 
+def test_pay_callback_rejects_while_sunsetting(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "sunset_mint", True)
+    assert client.get("/p/cb?amount=5000").json()["status"] == "ERROR"
+
+
 def test_pay_response_omits_mint_fee_when_free(client: TestClient):
     metadata = client.get("/p").json()["metadata"]
     assert "Mint fees:" not in metadata
@@ -200,6 +205,33 @@ def test_split_rejects_amount_out_of_range(client: TestClient, mint_note):
     for amount in (0, 5000, 6000):
         assert client.get(f"/w/cb?k1={k1}&amount={amount}&h={h}&h2={h2}").json()["status"] == "ERROR"
     assert note_value(client, k1) == 5000
+
+
+def test_split_rejects_while_sunsetting(client: TestClient, mint_note, monkeypatch):
+    k1 = mint_note(5000)
+    monkeypatch.setattr(settings, "sunset_mint", True)
+    _, h = fresh_secret()
+    _, h2 = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()["status"] == "ERROR"
+    assert note_value(client, k1) == 5000  # rejected before anything was burned
+
+
+def test_rotate_merge_and_melt_are_unaffected_by_sunsetting(client: TestClient, node: FakeNode, mint_note, monkeypatch):
+    a, b = mint_note(2000), mint_note(3000)
+    c = mint_note(4000)
+    monkeypatch.setattr(settings, "sunset_mint", True)
+
+    new_a, h_a = fresh_secret()
+    assert client.get(f"/w/cb?k1={a}&h={h_a}").json()["status"] == "OK"  # rotate
+    assert note_value(client, new_a) == 2000
+
+    new_bc, h_bc = fresh_secret()
+    assert client.get(f"/w/cb?k1={b}&k1={c}&h={h_bc}").json()["status"] == "OK"  # merge
+    assert note_value(client, new_bc) == 7000
+
+    pr = fake_invoice(7000)
+    assert client.get(f"/w/cb?k1={new_bc}&pr={pr}").json()["status"] == "OK"  # melt
+    assert node.paid == [pr]
 
 
 def test_merge_burns_all_and_mints_the_sum(client: TestClient, mint_note):

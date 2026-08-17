@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     # unauthenticated request can force
     max_k1s: int = 100
 
+    # winds this mint down: /p/cb (minting) and /w/cb's split branch (which,
+    # like minting, grows the number of outstanding notes) both reject
+    # outright while this is on - rotate, merge, and melt are all left
+    # alone, since none of them increases this mint's outstanding liability
+    # and an operator sunsetting a mint still needs holders to be able to
+    # consolidate and redeem their notes. Off by default.
+    sunset_mint: bool = False
+
     database_path: str = "mint.db"
 
     # LUD-21 (optional): serve /verify/{payment_hash} and advertise a
