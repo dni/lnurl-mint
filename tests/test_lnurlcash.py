@@ -22,7 +22,7 @@ def note_value(client: TestClient, k1: str) -> int | None:
 
 
 def test_pay_request_advertises_withdraw_link(client: TestClient):
-    data = client.get("/p").json()
+    data = client.get(f"/.well-known/lnurlp/{settings.username}").json()
     assert data["tag"] == "payRequest"
     assert data["withdrawLink"] == "http://testserver/w"
     assert data["minSendable"] <= data["maxSendable"]
@@ -62,14 +62,14 @@ def test_pay_callback_rejects_while_sunsetting(client: TestClient, monkeypatch):
 
 
 def test_pay_response_omits_mint_fee_when_free(client: TestClient):
-    metadata = client.get("/p").json()["metadata"]
+    metadata = client.get(f"/.well-known/lnurlp/{settings.username}").json()["metadata"]
     assert "Mint fees:" not in metadata
 
 
 def test_pay_response_advertises_mint_fee_when_configured(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     monkeypatch.setattr(settings, "fee_percent_ppm", 2000)
-    metadata = client.get("/p").json()["metadata"]
+    metadata = client.get(f"/.well-known/lnurlp/{settings.username}").json()["metadata"]
     assert ["text/plain", "Mint fees: 1000,2000"] in json.loads(metadata)
 
 
@@ -83,7 +83,7 @@ def test_pay_response_advertises_fee_inclusive_min_sendable(client: TestClient, 
     monkeypatch.setattr(settings, "min_mint_msat", 10_000)
     monkeypatch.setattr(settings, "min_sendable_msat", 10_000)
 
-    min_sendable = client.get("/p").json()["minSendable"]
+    min_sendable = client.get(f"/.well-known/lnurlp/{settings.username}").json()["minSendable"]
     assert min_sendable == 11000  # 10000 (min_mint_msat) + 1000 (fee)
 
     response = client.get(f"/p/cb?amount={min_sendable}")

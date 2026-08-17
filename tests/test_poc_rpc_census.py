@@ -77,9 +77,8 @@ def test_frontend_index_one_getinfo_per_request(client: TestClient, census: RpcC
 
 
 def test_pay_endpoints_no_rpc(client: TestClient, census: RpcCensus):
-    # /p and the LUD-16 alias are pure settings arithmetic - zero RPCs.
-    assert client.get("/p").status_code == 200
-    assert census.deltas() == {}
+    # the LUD-16 alias (this mint's only payRequest entry point) is pure
+    # settings arithmetic - zero RPCs.
     assert client.get("/.well-known/lnurlp/mint").status_code == 200
     assert census.deltas() == {}
 

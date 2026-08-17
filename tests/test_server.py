@@ -13,7 +13,7 @@ from lnurl_mint.server import app
 @pytest.mark.parametrize(
     "path",
     [
-        "/p",
+        "/p/cb?amount=5000",
         "/w?k1=" + "11" * 32,
         f"/.well-known/lnurlp/{settings.username}",
         f"/.well-known/lnurlw/{settings.username}",

@@ -192,7 +192,7 @@ def _tor_section(base: str) -> str:
         return ""
     onion_base = onion_url.rstrip("/")
     onion_host = urlparse(onion_base).hostname or onion_base
-    onion_lnurl = lnurl_encode(f"{onion_base}/p")
+    onion_lnurl = lnurl_encode(f"{onion_base}/.well-known/lnurlp/{settings.username}")
     return TOR_SECTION.substitute(
         qr_svg=_qr_svg(onion_lnurl),
         lnurl=onion_lnurl,
@@ -215,8 +215,8 @@ def _limits_section() -> str:
     actually fall into - min_mint_msat (the floor a note's value must clear
     net of fees) and router.max_mintable_msat (the fee-adjusted ceiling: a
     note minted from the full max_sendable_msat still nets less than that
-    raw setting whenever a mint fee is configured, same as /p's own
-    minSendable already accounts for on the floor side - see
+    raw setting whenever a mint fee is configured, same as the LUD-16
+    address's own minSendable already accounts for on the floor side - see
     router._min_sendable_msat), the same two numbers advertised on the
     mint-address discovery endpoint (see router.get_mint_address)."""
     return LIMITS_SECTION.substitute(
@@ -271,7 +271,7 @@ async def index(req: Request) -> HTMLResponse:
     """The one-pager: the mint's LNURL QR code (scan and pay to mint a
     bearer note), its lightning address, and the funding-source node info."""
     base, host = settings.public_base_url_and_host(str(req.base_url))
-    lnurl = lnurl_encode(f"{base}/p")
+    lnurl = lnurl_encode(f"{base}/.well-known/lnurlp/{settings.username}")
     address = f"{settings.username}@{host}"
     node_section, color = await _node_section()
     theme_color_meta = f'<meta name="theme-color" content="{color}">' if color else ""

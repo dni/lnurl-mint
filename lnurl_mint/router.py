@@ -317,7 +317,7 @@ def _mint_fee_msat(amount_msat: int) -> int:
     conventionally sat-denominated, and rounding up (rather than leaving a
     fractional-sat msat remainder) means the mint is never short a sat,
     matching or slightly exceeding the estimate a wallet derives from the
-    advertised `Mint fees: ` metadata entry (see _pay_response)."""
+    advertised `Mint fees: ` metadata entry (see get_lnaddress)."""
     fee_msat = settings.base_fee_msat + (amount_msat * settings.fee_percent_ppm) // 1_000_000
     return -(-fee_msat // 1000) * 1000
 
@@ -373,7 +373,17 @@ def _melt_fee_limit_msat(amount_msat: int) -> int:
     return max(round(amount_msat * 0.005), 5000, _mint_fee_msat(amount_msat))
 
 
-def _pay_response(req: Request) -> LnurlPayResponse:
+@router.get("/.well-known/lnurlp/{username}", tags=["lnurlcash"])
+def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
+    """LUD-16 Lightning Address payRequest that mints lnurlcash bearer
+    notes: `withdrawLink` points at the withdrawRequest endpoint
+    (get_withdraw) that will recognize this mint's payment preimages -
+    paying the invoice from the callback makes `<withdrawLink>?k1=<preimage>`
+    a bearer note. The mint is payable at {settings.username}@{host} (see
+    the frontend one-pager) - this well-known alias is this mint's only
+    payRequest entry point, there's no separate bare /p."""
+    if username != settings.username:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
     base, host = settings.public_base_url_and_host(str(req.base_url))
     metadata_entries = [
         ["text/plain", f"Mint an lnurlcash bearer note on {host}"],
@@ -391,24 +401,6 @@ def _pay_response(req: Request) -> LnurlPayResponse:
         metadata=metadata,
         withdrawLink=f"{base}/w",
     )
-
-
-@router.get("/p", tags=["lnurlcash"])
-def get_pay(req: Request) -> LnurlPayResponse:
-    """LUD-06 payRequest that mints lnurlcash bearer notes: `withdrawLink`
-    points at the withdrawRequest endpoint (get_withdraw) that will
-    recognize this mint's payment preimages - paying the invoice from the
-    callback makes `<withdrawLink>?k1=<preimage>` a bearer note."""
-    return _pay_response(req)
-
-
-@router.get("/.well-known/lnurlp/{username}", tags=["lnurlcash"])
-def get_lnaddress(req: Request, username: str) -> LnurlPayResponse:
-    """LUD-16: Lightning Address alias for the mint's payRequest - the mint
-    is payable at {settings.username}@{host} (see the frontend one-pager)."""
-    if username != settings.username:
-        raise HTTPException(HTTPStatus.NOT_FOUND, "Unknown user.")
-    return _pay_response(req)
 
 
 async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
@@ -437,7 +429,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
         maxWithdrawable=max_mintable_msat(),
         defaultDescription=f"lnurlcash bearer note on {host}",
         mintPubkey=mint_pubkey_value,
-        payLink=f"{base}/p",
+        payLink=f"{base}/.well-known/lnurlp/{settings.username}",
         nodeAlias=node_alias,
         nodeUri=node_uri,
         nodeColor=node_color,
@@ -497,7 +489,7 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
     notes.create_mint(payment_hash, pr, net_amount_msat)
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy - see
-    # config.py's own public_base_url docstring) - same as _pay_response
+    # config.py's own public_base_url docstring) - same as get_lnaddress
     base = settings.public_base_url(str(req.base_url))
     verify = f"{base}/verify/{payment_hash}" if settings.verify_enabled else None
     return LnurlPayActionResponse(pr=pr, verify=verify)
@@ -602,7 +594,7 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
         raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy) - same as
-    # _pay_response/get_pay_callback
+    # get_lnaddress/get_pay_callback
     base, host = settings.public_base_url_and_host(str(req.base_url))
     return LnurlWithdrawResponse(
         callback=f"{base}/w/cb",
