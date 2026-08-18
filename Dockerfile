@@ -27,6 +27,15 @@ WORKDIR /app
 COPY --from=builder /app/.venv ./.venv
 COPY lnurl_mint/ ./lnurl_mint/
 
+# /docs' Swagger UI assets are deliberately not committed to the repo (no
+# static blobs in git) - fetched here, at image build time, from a pinned
+# swagger-ui-dist version with a pinned sha256 per file (see
+# scripts/fetch_swagger_ui.py), so a CDN serving anything but those exact
+# bytes fails the build loudly. Same integrity guarantee as vendoring; the
+# tradeoff is the CDN must be reachable at build time.
+COPY scripts/fetch_swagger_ui.py scripts/
+RUN python scripts/fetch_swagger_ui.py
+
 # the version this image reports (see lnurl_mint/__init__.py) - passed by
 # the release workflow from the git tag being released; local `make build`
 # / CI's build-check leave it at this placeholder since neither is a release

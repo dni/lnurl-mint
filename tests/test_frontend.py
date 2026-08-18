@@ -164,3 +164,31 @@ def test_index_max_amount_accounts_for_mint_fee(client: TestClient, node, monkey
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     response = client.get("/")
     assert f"{(settings.max_sendable_msat - 1000) // 1000:,} sats" in response.text
+
+
+def test_docs_serves_swagger_ui_with_no_third_party_assets(client: TestClient):
+    response = client.get("/docs")
+    assert response.status_code == 200
+    assert "/openapi.json" in response.text
+    assert "/static/swagger-ui-bundle.js" in response.text
+    assert "/static/swagger-ui.css" in response.text
+    assert "/favicon.svg" in response.text
+    # no CDN references - the whole point of self-hosting (see frontend.py)
+    assert "cdn.jsdelivr.net" not in response.text
+    assert "fastapi.tiangolo.com" not in response.text
+
+
+def test_swagger_assets_are_served(client: TestClient):
+    js = client.get("/static/swagger-ui-bundle.js")
+    assert js.status_code == 200
+    assert js.headers["content-type"].startswith("application/javascript")
+    css = client.get("/static/swagger-ui.css")
+    assert css.status_code == 200
+    assert css.headers["content-type"].startswith("text/css")
+
+
+def test_openapi_reports_package_version(client: TestClient):
+    from lnurl_mint import __version__
+
+    data = client.get("/openapi.json").json()
+    assert data["info"]["version"] == __version__
