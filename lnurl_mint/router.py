@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from hashlib import sha256
 from http import HTTPStatus
 from typing import Awaitable, Callable
@@ -56,6 +57,42 @@ def _funding_source() -> LightningBackendConfig:
 # case a retry can actually fix) a chance to clear before _melt_pay gives
 # up and leaves the notes pending for manual reconciliation. ~31s total.
 _CONFIRMATION_RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 16)
+
+# payment hashes with a live, in-process melt attempt - registered by
+# get_withdraw_callback the moment mark_pending succeeds (before the
+# response goes out and the background task even starts) and dropped by
+# _melt_pay when it finishes. reconcile_pending_melts skips these: for a
+# live attempt the funding source can legitimately report "payment
+# unknown" (lnd's TrackPaymentV2 404, cln's empty listpays) simply because
+# pay_invoice's RPC hasn't landed yet, and restoring the note then frees
+# it while its payment is still going out - a double spend (regression
+# tests: tests/test_poc_reconcile_inflight_race.py). A note left pending
+# by a crashed or restarted process is never in this map (background tasks
+# don't survive a restart), so reconcile still picks those up exactly as
+# before. Refcounted: two melts of different notes into the same invoice
+# share one payment hash. All normal access is on the event loop, but the
+# lock keeps the refcount correct when tests drive requests from threads.
+_in_flight_melts: dict[str, int] = {}
+_in_flight_melts_lock = threading.Lock()
+
+
+def _track_melt_start(payment_hash: str) -> None:
+    with _in_flight_melts_lock:
+        _in_flight_melts[payment_hash] = _in_flight_melts.get(payment_hash, 0) + 1
+
+
+def _track_melt_end(payment_hash: str) -> None:
+    with _in_flight_melts_lock:
+        remaining = _in_flight_melts.get(payment_hash, 0) - 1
+        if remaining > 0:
+            _in_flight_melts[payment_hash] = remaining
+        else:
+            _in_flight_melts.pop(payment_hash, None)
+
+
+def _melt_in_flight(payment_hash: str) -> bool:
+    with _in_flight_melts_lock:
+        return payment_hash in _in_flight_melts
 
 
 async def _confirm_payment(
@@ -127,42 +164,63 @@ async def _melt_pay(
     assert amount_msat is not None
 
     try:
-        result = await pay_invoice(pr, funding_source, _melt_fee_limit_msat(amount_msat))
-    except Exception as exc:
-        if not decoded.has_payment_hash:
-            log_internal_error(f"melt {note_ids}: error paying invoice, nothing to confirm against - left pending", exc)
+        try:
+            result = await pay_invoice(pr, funding_source, _melt_fee_limit_msat(amount_msat))
+        except Exception as exc:
+            if not decoded.has_payment_hash:
+                log_internal_error(
+                    f"melt {note_ids}: error paying invoice, nothing to confirm against - left pending", exc
+                )
+                return
+            completed = await _confirm_payment(decoded.payment_hash, funding_source)
+            if completed is None:
+                log_internal_error(
+                    f"melt {note_ids}: could not confirm payment status after retries - left pending", exc
+                )
+                return
+            if not completed:
+                logging.info("melt %s: confirmed not paid (%s) - restoring", note_ids, exc)
+                notes.restore(note_ids)
+                return
+            notes.finalize_melt(note_ids)
+            # routing fee unknown here - confirmed via is_payment_complete
+            # (a status check), not pay_invoice's own response, which is the
+            # only place either backend reports the fee actually paid
+            log_melt(note_ids, amount_msat, None)
             return
-        completed = await _confirm_payment(decoded.payment_hash, funding_source)
-        if completed is None:
-            log_internal_error(f"melt {note_ids}: could not confirm payment status after retries - left pending", exc)
-            return
-        if not completed:
-            logging.info("melt %s: confirmed not paid (%s) - restoring", note_ids, exc)
-            notes.restore(note_ids)
-            return
-        notes.finalize_melt(note_ids)
-        # routing fee unknown here - confirmed via is_payment_complete
-        # (a status check), not pay_invoice's own response, which is the
-        # only place either backend reports the fee actually paid
-        log_melt(note_ids, amount_msat, None)
-        return
 
-    notes.finalize_melt(note_ids)
-    log_melt(note_ids, amount_msat, result.fee_msat)
+        notes.finalize_melt(note_ids)
+        log_melt(note_ids, amount_msat, result.fee_msat)
+    finally:
+        # the attempt is over, whatever its outcome - drop the in-flight
+        # registration (see _in_flight_melts) so a note this left pending
+        # becomes visible to reconcile_pending_melts again
+        _track_melt_end(decoded.payment_hash)
 
 
 async def reconcile_pending_melts(funding_source: LightningBackendConfig) -> None:
-    """Resolves every note _melt_pay left pending across a restart (see
+    """Resolves every note _melt_pay left pending without resolving (see
     NoteStore.pending_melts) - a note only ends up there if its melt's
-    outgoing payment outcome couldn't be established before the process
-    stopped, whether from a crash mid-melt or _melt_pay's own left-pending
-    fallback for a genuinely unconfirmable outcome (see its docstring).
-    Called from server.py's lifespan at boot, once the funding source is
-    known reachable, so an operator doesn't have to resolve these by hand -
-    just keep the funding source up and restart. Same confirm-before-acting
-    discipline as _melt_pay: a note that still can't be confirmed here is
-    logged and left exactly as it was, to be retried at the next boot."""
+    outgoing payment outcome couldn't be established, whether from a crash
+    mid-melt, a restart before the background task finished, or _melt_pay's
+    own left-pending fallback for a genuinely unconfirmable outcome (see
+    its docstring). Called from server.py's lifespan at boot and from its
+    monitor on every healthy tick, so an operator doesn't have to resolve
+    these by hand - just keep the funding source up. Same
+    confirm-before-acting discipline as _melt_pay: a note that still can't
+    be confirmed here is logged and left exactly as it was, to be retried
+    at the next tick or boot.
+
+    Notes whose melt attempt is still live IN THIS process are skipped (see
+    _in_flight_melts): for those, the funding source can report "payment
+    unknown" - lnd's TrackPaymentV2 404, cln's empty listpays - simply
+    because pay_invoice's RPC hasn't landed yet, and a restore here would
+    free the note while its payment is still going out (a double spend -
+    regression tests: tests/test_poc_reconcile_inflight_race.py). Their own
+    _melt_pay resolves them."""
     for payment_hash, note_ids in notes.pending_melts().items():
+        if _melt_in_flight(payment_hash):
+            continue
         completed = await _confirm_payment(payment_hash, funding_source, delays=())
         if completed is None:
             # same log_internal_error as _melt_pay's own left-pending case
@@ -650,7 +708,9 @@ async def get_withdraw_callback(
       background and only then burns or restores them (see its own
       docstring). A `pr` naming an invoice this same mint issued via
       /p/cb is rejected synchronously instead of being paid back to this
-      mint's own node.
+      mint's own node; a `pr` whose payment hash an earlier melt already
+      used is likewise rejected (the funding source dedupes by payment
+      hash, so it would burn the note without moving funds).
     - Every note minted here (never on melt) is signed per Offline
       verification, over the hash WALLET supplied - omitted if no funding
       source is configured or signing fails (see signing.sign_note).
@@ -712,6 +772,18 @@ async def get_withdraw_callback(
         if decoded.has_payment_hash and notes.mint_pr(decoded.payment_hash) is not None:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Cannot melt into an invoice this mint issued itself.")
 
+        # a payment hash an earlier melt already used is never paid into
+        # again: the funding source dedupes by payment hash (cln's xpay
+        # rejects with "already paid", lnd replays the prior payment's
+        # status), so the second melt would be confirmed against the FIRST
+        # payment and burn its note without any funds moving. Reject
+        # outright instead. Trade-off: even a genuinely failed melt keeps
+        # its melts row (NoteStore.record_melt is unconditional, for LUD-25
+        # verify), so retrying one needs a fresh invoice - BOLT-11 invoices
+        # are single-use anyway.
+        if decoded.has_payment_hash and notes.melt_pr(decoded.payment_hash) is not None:
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "Invoice already used by an earlier melt - use a fresh one.")
+
         funding_source = _funding_source()
 
         try:
@@ -724,24 +796,37 @@ async def get_withdraw_callback(
             # _resolve_note itself uses, not an internal error
             raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
 
-        # LUD-25 melt verify: recorded unconditionally (see
-        # NoteStore.record_melt), same as a mint invoice's own `pr` - the
-        # endpoint serves whatever was recorded while VERIFY_ENABLED is on
-        # and 404s while off (see verify_invoice), the setting also gating
-        # whether it's advertised below
-        melt_verify_url = None
-        if decoded.has_payment_hash:
-            notes.record_melt(decoded.payment_hash, pr)
-            if settings.verify_enabled:
-                base = settings.public_base_url(str(req.base_url))
-                melt_verify_url = f"{base}/verify/{decoded.payment_hash}"
+        # registered the moment the reservation lands - BEFORE the response
+        # goes out and the background task starts - so the monitor's
+        # periodic reconcile never mistakes this live, in-process attempt
+        # for a leftover and restores the note out from under a payment
+        # that simply hasn't reached the funding source yet (see
+        # _in_flight_melts). _melt_pay drops the registration when done.
+        _track_melt_start(decoded.payment_hash)
+        try:
+            # LUD-25 melt verify: recorded unconditionally (see
+            # NoteStore.record_melt), same as a mint invoice's own `pr` - the
+            # endpoint serves whatever was recorded while VERIFY_ENABLED is on
+            # and 404s while off (see verify_invoice), the setting also gating
+            # whether it's advertised below
+            melt_verify_url = None
+            if decoded.has_payment_hash:
+                notes.record_melt(decoded.payment_hash, pr)
+                if settings.verify_enabled:
+                    base = settings.public_base_url(str(req.base_url))
+                    melt_verify_url = f"{base}/verify/{decoded.payment_hash}"
 
-        # per LUD-03 step 6, SERVICE replies {"status": "OK"} here and only
-        # then attempts the payment asynchronously - _melt_pay runs as a
-        # background task after this response has already gone out, so it
-        # has no way left to report a failure back to the wallet (see its
-        # docstring)
-        background_tasks.add_task(_melt_pay, note_ids, pr, decoded, funding_source)
+            # per LUD-03 step 6, SERVICE replies {"status": "OK"} here and only
+            # then attempts the payment asynchronously - _melt_pay runs as a
+            # background task after this response has already gone out, so it
+            # has no way left to report a failure back to the wallet (see its
+            # docstring)
+            background_tasks.add_task(_melt_pay, note_ids, pr, decoded, funding_source)
+        except Exception:
+            # never scheduled - drop the registration again so the periodic
+            # reconcile can still pick the stranded pending note up
+            _track_melt_end(decoded.payment_hash)
+            raise
         if melt_verify_url is not None:
             return WithdrawSuccessResponse(pr=pr, verify=melt_verify_url)
         return WithdrawSuccessResponse()

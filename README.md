@@ -236,6 +236,13 @@ Configure the funding source via `.env` (see `.env.example`), lnd or cln REST.
 Without one, minting and melting are unavailable (rotate/split/merge of existing
 notes still work).
 
+Run exactly **one process** per `DATABASE_PATH`: no `--workers` greater than 1,
+and no second container sharing the same database file. Note reservation,
+burning, and melt reconciliation are coordinated inside a single process (a
+module-level lock plus in-process background tasks over one sqlite connection) -
+a second process silently voids those guarantees: at best spurious "database is
+locked" errors, at worst double spends.
+
 **cln rune**: this mint only ever calls `invoice`, `xpay`, `signmessage`,
 `listinvoices`, `listpays`, `getinfo` and `listchannels` (see `node.py`) -
 `listchannels` reads the *public* gossip store (for `capacity`, see
