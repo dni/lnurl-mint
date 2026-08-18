@@ -26,7 +26,7 @@ def test_index_shows_title_description_qr_and_address(client: TestClient):
 
 def test_index_links_to_the_wallet_with_this_mints_address(client: TestClient):
     response = client.get("/")
-    assert "https://dni.github.io/lnurl-wallet" in response.text
+    assert "https://wallet.lnurlcash.com" in response.text
     assert f"{settings.username}@testserver" in response.text
 
 
