@@ -45,6 +45,12 @@ def test_index_shows_node_info(client: TestClient, node):
     assert f"{node.pubkey}@127.0.0.1:9735" in response.text
 
 
+def test_index_shows_explorer_links(client: TestClient, node):
+    response = client.get("/")
+    assert f"https://mempool.space/lightning/node/{node.pubkey}" in response.text
+    assert f"https://amboss.space/node/{node.pubkey}" in response.text
+
+
 def test_index_without_funding_source(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "fundingsource_backend", None)
     response = client.get("/")

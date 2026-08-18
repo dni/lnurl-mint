@@ -25,8 +25,8 @@ from .models import (
 )
 from .node import (
     LightningBackendConfig,
+    cached_fetch_node_info,
     create_invoice,
-    fetch_node_info,
     invoice_preimage,
     is_invoice_settled,
     is_payment_complete,
@@ -484,7 +484,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
     node_capacity = node_num_channels = node_num_peers = None
     if funding_source.backend:
         try:
-            info = await fetch_node_info(funding_source)
+            info = await cached_fetch_node_info(funding_source)
             node_alias = info.alias
             node_uri = info.uri
             node_color = info.color

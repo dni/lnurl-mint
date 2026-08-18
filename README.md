@@ -16,7 +16,7 @@ a reference wallet implementation (hosted at
 
 | Endpoint        | Role                                                                          |
 |-----------------|-------------------------------------------------------------------------------|
-| `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity |
+| `GET /`         | one-pager frontend: mint QR code (LNURL of the LUD-16 address), lightning address, mint limits, node info incl. capacity and mempool.space/amboss.space links |
 | `GET /.well-known/lnurlp/{username}` | LUD-06 payRequest, extended with `withdrawLink` (the mint advertisement) - the mint is payable at `{USERNAME}@{BASE_URL host}` (or the reserved bare-domain `_@{BASE_URL host}`, see below), and this is its only payRequest entry point (no separate bare `/p`) |
 | `GET /p/cb`   | LUD-06 callback, invoice whose preimage becomes a note once paid - reports `disposable: false` ([LUD-11](../luds/11.md)): the lightning address itself is meant to be stored and reused |
 | `GET /verify/{payment_hash}` | LUD-21, settlement status for an invoice minted via `/p/cb` or paid out by a melt via `/w/cb` ([LUD-25](../luds/25.md)) |
@@ -211,6 +211,23 @@ required set below) is logged as a warning and leaves capacity at `0`
 rather than failing the whole node lookup; check the logs for "could not
 fetch capacity" if it's unexpectedly `0` on a node that does have public
 channels.
+
+**Node info caching**: `node.cached_fetch_node_info` (used by the frontend
+one-pager and the mint-address endpoint - not by the startup connectivity
+check, the background health monitor, or LUD-25's `mint_pubkey`/
+`sign_note`, all of which still call `fetch_node_info` directly for a
+live, uncached probe) keeps the last successful result in-process for up
+to an hour, so repeated page views or `.well-known/lnurlw/{username}`
+lookups don't each cost a fresh getinfo (plus the capacity/color RPCs
+alongside it) against the funding source - a node's identity and channel
+counts don't change minute to minute. A failed fetch is never cached, so
+a momentary outage can recover on the very next request rather than
+reporting "unreachable" for a full hour.
+
+The frontend one-pager also links this node's pubkey out to
+[mempool.space](https://mempool.space) and
+[amboss.space](https://amboss.space) (their Lightning node explorer
+pages) once it has one to link to.
 
 **Tor**: set `ONION_URL` to this mint's hidden service address (e.g.
 `http://<v3-address>.onion`) to advertise it on the frontend one-pager as an

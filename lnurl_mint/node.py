@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import ssl
+import time
 from base64 import b64decode, b64encode
 from hashlib import sha256
 from os import urandom
@@ -612,6 +613,42 @@ async def fetch_node_info(config: LightningBackendConfig) -> NodeInfo:
     """A single getinfo against the funding source - both lnd and cln report
     identity, alias, and channel/peer counts in one call."""
     return await _dispatch("fetch_node_info", config, _fetch_node_info_lnd, _fetch_node_info_cln)
+
+
+# in-process cache for cached_fetch_node_info below - (fetched_at, info),
+# module-level so it's shared across every request/caller within this
+# process, not per-request or per-caller
+_node_info_cache: tuple[float, NodeInfo] | None = None
+_NODE_INFO_CACHE_TTL_SECONDS = 3600
+
+
+async def cached_fetch_node_info(config: LightningBackendConfig) -> NodeInfo:
+    """fetch_node_info, cached in-process for up to an hour - the frontend
+    one-pager and the mint-address discovery endpoint (router.py) both call
+    this on every single request they serve, but a node's identity/color/
+    channel counts/capacity change slowly enough that a live RPC round trip
+    per page view or per lnurlw lookup is wasted load on the funding source
+    for data that's effectively static minute to minute. Only these two
+    display surfaces go through the cache: the startup connectivity check
+    and the background health monitor (server.py) need a live, uncached
+    probe to actually detect an outage or recovery, and LUD-25's
+    mint_pubkey/sign_note (signing.py) call fetch_node_info directly too -
+    none of those would be served correctly by up-to-an-hour-stale data.
+
+    Never caches a failure: if the underlying fetch raises, this raises too
+    and nothing is cached for next time - a momentary funding-source hiccup
+    should be retried (and can recover) on the very next request, not stay
+    "unreachable" for a full hour just because it was asked at a bad
+    moment."""
+    global _node_info_cache
+    now = time.monotonic()
+    if _node_info_cache is not None:
+        fetched_at, info = _node_info_cache
+        if now - fetched_at < _NODE_INFO_CACHE_TTL_SECONDS:
+            return info
+    info = await fetch_node_info(config)
+    _node_info_cache = (now, info)
+    return info
 
 
 async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackendConfig) -> NodeInfo:
