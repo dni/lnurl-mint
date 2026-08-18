@@ -7,6 +7,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import __version__
 from .config import settings
 from .errors import log_internal_error
 from .frontend import frontend_router
@@ -143,6 +144,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="lnurl-mint",
     description="Minimal lnurlcash (LUD-25, Lightning bearer assets) mint - LUD-03/LUD-06 only.",
+    version=__version__,
+    # the default /docs and /redoc load Swagger UI / ReDoc from a CDN;
+    # frontend.py serves /docs from a local copy instead (fetched at build
+    # time, see scripts/fetch_swagger_ui.py), and there is no local ReDoc
+    docs_url=None,
+    redoc_url=None,
     lifespan=lifespan,
 )
 

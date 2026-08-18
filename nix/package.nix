@@ -2,6 +2,7 @@
   lib,
   python3,
   fetchPypi,
+  fetchurl,
   makeWrapper,
   src, # the flake root, passed in from flake.nix (self)
 }:
@@ -69,6 +70,22 @@ let
       bech32
       coincurve
     ];
+
+  # /docs' Swagger UI assets are deliberately not committed to the repo (no
+  # static blobs in git) - fetched at build time instead, and a fetchurl
+  # fixed-output derivation pins the sha256, so this works in the network-
+  # less build sandbox and a CDN serving anything but those exact bytes
+  # fails the build. Same files and hashes as scripts/fetch_swagger_ui.py
+  # (used by the Dockerfile, CI, and the Makefile) - bump both together.
+  swaggerUiVersion = "5.32.13";
+  swaggerUiBundle = fetchurl {
+    url = "https://cdn.jsdelivr.net/npm/swagger-ui-dist@${swaggerUiVersion}/swagger-ui-bundle.js";
+    hash = "sha256-Xzvl2c9AzdYNyg2v6vh0P9hY0bO7cXu9rr9yATA/Y9c=";
+  };
+  swaggerUiCss = fetchurl {
+    url = "https://cdn.jsdelivr.net/npm/swagger-ui-dist@${swaggerUiVersion}/swagger-ui.css";
+    hash = "sha256-nmF9msCvsOQwwRoXNm3oYk23zjTJnr0pdEPwBIzjCJk=";
+  };
 in
 python3Packages.buildPythonApplication rec {
   pname = "lnurl-mint";
@@ -95,6 +112,15 @@ python3Packages.buildPythonApplication rec {
 
   nativeBuildInputs = [ makeWrapper ];
 
+  # the /docs assets (see the let block) are copied into the source tree
+  # before the build: checkPhase runs pytest against the tree and the docs
+  # tests serve them, and a flake source is a git tree, so gitignored files
+  # are never in it
+  postPatch = ''
+    cp ${swaggerUiBundle} lnurl_mint/static/swagger-ui-bundle.js
+    cp ${swaggerUiCss} lnurl_mint/static/swagger-ui.css
+  '';
+
   # no [project.scripts] upstream - the app is served by uvicorn; wrap it so
   # `nix run` and the NixOS module have a single entry point to exec. The
   # wrapper captures the build-time PYTHONPATH (the full dependency closure)
@@ -103,6 +129,12 @@ python3Packages.buildPythonApplication rec {
     makeWrapper ${lib.getExe python3Packages.uvicorn} $out/bin/lnurl-mint \
       --add-flags "lnurl_mint.server:app" \
       --prefix PYTHONPATH : "$out/${python3.sitePackages}:$PYTHONPATH"
+
+    # hatchling excludes gitignored files from the wheel, so the /docs
+    # assets copied into the tree above never reach site-packages - put them
+    # there directly (the app resolves them relative to __file__)
+    cp ${swaggerUiBundle} $out/${python3.sitePackages}/lnurl_mint/static/swagger-ui-bundle.js
+    cp ${swaggerUiCss} $out/${python3.sitePackages}/lnurl_mint/static/swagger-ui.css
   '';
 
   nativeCheckInputs = [ python3Packages.pytest ];

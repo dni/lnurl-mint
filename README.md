@@ -399,6 +399,12 @@ bolt11 version bump in `pyproject.toml`/`uv.lock`.
 uv run pytest
 ```
 
+The `/docs` Swagger UI assets are gitignored and fetched at build time
+(pinned version + sha256, see `scripts/fetch_swagger_ui.py`), so on a fresh
+clone the docs tests need them first: `make test` fetches them for you, or
+run `uv run python scripts/fetch_swagger_ui.py` before a bare `uv run
+pytest` (same inside `nix develop`).
+
 ## Release
 
 Pushing a `v*` tag (`git tag v1.2.0 && git push origin v1.2.0`) triggers

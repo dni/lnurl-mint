@@ -1,4 +1,4 @@
-.PHONY: all format lint check test black ruff checkblack checkruff mypy dev serve install build run
+.PHONY: all format lint check test black ruff checkblack checkruff mypy dev serve install build run static
 
 # 8111, not 8000: this is meant to run alongside a full lnurl_server
 # instance on the same host, which already claims 8000
@@ -26,17 +26,22 @@ checkblack:
 mypy:
 	uv run mypy lnurl_mint
 
-test:
+test: static
 	uv run pytest
 
 install:
 	uv sync
 
-dev:
+# the /docs assets are gitignored and fetched at build time (pinned version
+# + sha256, see scripts/fetch_swagger_ui.py); a no-op once they're present
+static:
+	uv run python scripts/fetch_swagger_ui.py
+
+dev: static
 	FORWARDED_ALLOW_IPS=* \
 	uv run uvicorn lnurl_mint.server:app --reload --host 0.0.0.0 --port $(PORT)
 
-serve:
+serve: static
 	FORWARDED_ALLOW_IPS=* \
 	uv run uvicorn lnurl_mint.server:app --host 0.0.0.0 --port $(PORT)
 

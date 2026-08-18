@@ -7,6 +7,7 @@ import qrcode
 import qrcode.image.svg
 from bech32 import bech32_encode, convertbits
 from fastapi import APIRouter, Request
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, HTMLResponse
 
 from . import __version__
@@ -19,6 +20,13 @@ frontend_router = APIRouter()
 # Served locally at /favicon.svg rather than linked from lnurl-wallet's
 # GitHub Pages, so the page has no third-party asset dependency.
 FAVICON_PATH = Path(__file__).parent / "static" / "favicon.svg"
+
+# Swagger UI, fetched at build time by scripts/fetch_swagger_ui.py (pinned
+# swagger-ui-dist version + pinned sha256 there; gitignored, never committed)
+# so /docs pulls nothing from a CDN - a third-party script would execute on
+# this origin, and docs readers' IPs would leak to it.
+SWAGGER_JS_PATH = Path(__file__).parent / "static" / "swagger-ui-bundle.js"
+SWAGGER_CSS_PATH = Path(__file__).parent / "static" / "swagger-ui.css"
 
 
 def lnurl_encode(url: str) -> str:
@@ -279,6 +287,30 @@ async def _node_section() -> tuple[str, str | None]:
 @frontend_router.get("/favicon.svg", include_in_schema=False)
 async def favicon() -> FileResponse:
     return FileResponse(FAVICON_PATH, media_type="image/svg+xml")
+
+
+@frontend_router.get("/static/swagger-ui-bundle.js", include_in_schema=False)
+async def swagger_js() -> FileResponse:
+    return FileResponse(SWAGGER_JS_PATH, media_type="application/javascript")
+
+
+@frontend_router.get("/static/swagger-ui.css", include_in_schema=False)
+async def swagger_css() -> FileResponse:
+    return FileResponse(SWAGGER_CSS_PATH, media_type="text/css")
+
+
+@frontend_router.get("/docs", include_in_schema=False)
+async def docs(req: Request) -> HTMLResponse:
+    """Replaces FastAPI's default /docs (disabled in server.py), which loads
+    Swagger UI from jsdelivr; this one serves the local copy instead (see
+    the SWAGGER_*_PATH comment above)."""
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{req.app.title} - Swagger UI",
+        swagger_js_url="/static/swagger-ui-bundle.js",
+        swagger_css_url="/static/swagger-ui.css",
+        swagger_favicon_url="/favicon.svg",
+    )
 
 
 @frontend_router.get("/", include_in_schema=False)
