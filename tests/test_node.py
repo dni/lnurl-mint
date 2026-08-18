@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
@@ -57,31 +58,36 @@ def _mock_async_client_by_path(responses: dict[str, httpx.Response]):
 def test_lnd_node_info_reports_public_graph_capacity_in_msat(monkeypatch):
     # GetNodeInfo (self-lookup, /v1/graph/node/{pubkey}), not ListChannels -
     # this must read the same total_capacity a stranger could already see
-    # from this node's own announced channels, never its private balances
+    # from this node's own announced channels, never its private balances.
+    # lnd reports total_capacity in sats, converted here to keep
+    # NodeInfo.capacity msat-denominated like everything else.
     responses = {
         "/v1/getinfo": httpx.Response(200, json={"alias": "n", "identity_pubkey": "abc"}),
         "/v1/graph/node/abc": httpx.Response(200, json={"num_channels": 2, "total_capacity": "150000"}),
     }
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client_by_path(responses))
     info = _run(_fetch_node_info_lnd(LND_CONFIG.url, "deadbeef", LND_CONFIG))
-    assert info.capacity_msat == 150_000_000
+    assert info.capacity == 150_000_000
 
 
-def test_lnd_node_info_capacity_failure_is_swallowed(monkeypatch):
+def test_lnd_node_info_capacity_failure_is_swallowed(monkeypatch, caplog):
     responses = {
         "/v1/getinfo": httpx.Response(200, json={"alias": "n", "identity_pubkey": "abc"}),
         "/v1/graph/node/abc": httpx.Response(404, text="node not found in graph"),
     }
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client_by_path(responses))
-    info = _run(_fetch_node_info_lnd(LND_CONFIG.url, "deadbeef", LND_CONFIG))
+    with caplog.at_level(logging.WARNING):
+        info = _run(_fetch_node_info_lnd(LND_CONFIG.url, "deadbeef", LND_CONFIG))
     assert info.alias == "n"
-    assert info.capacity_msat == 0
+    assert info.capacity == 0
+    # a failure must be diagnosable, not indistinguishable from "genuinely 0"
+    assert any("could not fetch capacity" in r.message for r in caplog.records)
 
 
 def test_cln_node_info_reports_public_graph_capacity_in_msat(monkeypatch):
     # listchannels source=<our id> (public gossip), not listfunds - a
     # single public channel appears once per direction, sharing the same
-    # capacity, so the duplicate must not double-count it
+    # capacity, so the duplicate must not double-count it.
     responses = {
         "/v1/getinfo": httpx.Response(200, json={"id": "abc", "alias": "n"}),
         "/v1/listchannels": httpx.Response(
@@ -97,18 +103,23 @@ def test_cln_node_info_reports_public_graph_capacity_in_msat(monkeypatch):
     }
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client_by_path(responses))
     info = _run(_fetch_node_info_cln(CLN_CONFIG.url, "deadbeef", CLN_CONFIG))
-    assert info.capacity_msat == 150_000_000
+    assert info.capacity == 150_000_000
 
 
-def test_cln_node_info_capacity_failure_is_swallowed(monkeypatch):
+def test_cln_node_info_capacity_failure_is_swallowed(monkeypatch, caplog):
     responses = {
         "/v1/getinfo": httpx.Response(200, json={"id": "abc", "alias": "n"}),
         "/v1/listchannels": httpx.Response(500, text="rune error"),
     }
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client_by_path(responses))
-    info = _run(_fetch_node_info_cln(CLN_CONFIG.url, "deadbeef", CLN_CONFIG))
+    with caplog.at_level(logging.WARNING):
+        info = _run(_fetch_node_info_cln(CLN_CONFIG.url, "deadbeef", CLN_CONFIG))
     assert info.alias == "n"
-    assert info.capacity_msat == 0
+    assert info.capacity == 0
+    # a rune baked before `listchannels` was added to the required set (see
+    # README) is exactly this failure mode - the warning is what makes it
+    # diagnosable instead of looking like "this node genuinely has 0"
+    assert any("could not fetch capacity" in r.message for r in caplog.records)
 
 
 def test_lnd_payment_complete_reports_true_for_succeeded(monkeypatch):

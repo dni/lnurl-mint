@@ -168,7 +168,7 @@ class FakeNode:
             color="#3399ff",
             num_channels=3,
             num_peers=5,
-            capacity_msat=750_000_000,
+            capacity=750_000_000,
         )
 
     async def sign_message(self, message: str, config) -> tuple[bytes, int]:

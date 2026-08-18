@@ -104,7 +104,7 @@ class LnurlMintAddressResponse(BaseModel):
     nodeAlias: str | None = None
     nodeUri: str | None = None
     nodeColor: str | None = None
-    nodeCapacityMsat: int | None = None
+    nodeCapacity: int | None = None  # msat - see node.NodeInfo.capacity
     # same channel/peer counts NODE_SECTION already shows on the one-pager
     # frontend (see frontend._node_section) - included here too so a wallet
     # discovering this endpoint gets the same picture without scraping HTML
