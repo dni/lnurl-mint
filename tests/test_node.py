@@ -5,14 +5,17 @@ import logging
 import httpx
 import pytest
 
+import lnurl_mint.node as node_module
 from lnurl_mint.node import (
     LightningBackendConfig,
+    NodeInfo,
     _cln_pay_failure_reason,
     _fetch_node_info_cln,
     _fetch_node_info_lnd,
     _is_payment_complete_cln,
     _is_payment_complete_lnd,
     _lnd_failure_reason,
+    cached_fetch_node_info,
 )
 
 PAYMENT_HASH = "11" * 32
@@ -120,6 +123,65 @@ def test_cln_node_info_capacity_failure_is_swallowed(monkeypatch, caplog):
     # README) is exactly this failure mode - the warning is what makes it
     # diagnosable instead of looking like "this node genuinely has 0"
     assert any("could not fetch capacity" in r.message for r in caplog.records)
+
+
+class _FakeMonotonic:
+    """Stands in for node.time so cached_fetch_node_info's TTL check can be
+    driven deterministically (advance `.now`) instead of actually sleeping
+    an hour - only replaces the `time` name inside node.py's own namespace,
+    the real time module elsewhere is untouched."""
+
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def test_cached_fetch_node_info_reuses_within_the_ttl(monkeypatch):
+    monkeypatch.setattr(node_module, "_node_info_cache", None)
+    fake_time = _FakeMonotonic()
+    monkeypatch.setattr(node_module, "time", fake_time)
+    calls = {"n": 0}
+
+    async def fake_fetch(config: LightningBackendConfig) -> NodeInfo:
+        calls["n"] += 1
+        return NodeInfo(alias=f"call-{calls['n']}")
+
+    monkeypatch.setattr(node_module, "fetch_node_info", fake_fetch)
+
+    first = _run(cached_fetch_node_info(LND_CONFIG))
+    second = _run(cached_fetch_node_info(LND_CONFIG))
+    assert first.alias == "call-1"
+    assert second.alias == "call-1"  # served from cache, not refetched
+    assert calls["n"] == 1
+
+    fake_time.now += node_module._NODE_INFO_CACHE_TTL_SECONDS + 1
+    third = _run(cached_fetch_node_info(LND_CONFIG))
+    assert third.alias == "call-2"
+    assert calls["n"] == 2
+
+
+def test_cached_fetch_node_info_does_not_cache_a_failure(monkeypatch):
+    monkeypatch.setattr(node_module, "_node_info_cache", None)
+    calls = {"n": 0}
+
+    async def flaky_fetch(config: LightningBackendConfig) -> NodeInfo:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("funding source unreachable")
+        return NodeInfo(alias="recovered")
+
+    monkeypatch.setattr(node_module, "fetch_node_info", flaky_fetch)
+
+    with pytest.raises(ConnectionError):
+        _run(cached_fetch_node_info(LND_CONFIG))
+
+    # the failed attempt above must not have poisoned the cache - the very
+    # next call retries live and succeeds, rather than staying "unreachable"
+    info = _run(cached_fetch_node_info(LND_CONFIG))
+    assert info.alias == "recovered"
+    assert calls["n"] == 2
 
 
 def test_lnd_payment_complete_reports_true_for_succeeded(monkeypatch):

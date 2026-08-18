@@ -46,7 +46,7 @@ from bolt11.types import Bolt11
 from coincurve import PrivateKey
 from fastapi.testclient import TestClient
 
-import lnurl_mint.frontend as frontend_module
+import lnurl_mint.node as node_module
 import lnurl_mint.router as router_module
 import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
@@ -189,11 +189,18 @@ def node(monkeypatch: pytest.MonkeyPatch) -> FakeNode:
     monkeypatch.setattr(router_module, "pay_invoice", fake.pay_invoice)
     monkeypatch.setattr(router_module, "is_payment_complete", fake.is_payment_complete)
     monkeypatch.setattr(router_module, "payment_preimage", fake.payment_preimage)
-    monkeypatch.setattr(router_module, "fetch_node_info", fake.fetch_node_info)
+    # cached_fetch_node_info (router.py/frontend.py's shared 1h node-info
+    # cache, see node.py) wraps this same fetch_node_info - patched once,
+    # here, rather than patching cached_fetch_node_info per-module, so its
+    # real caching logic still runs (and is actually exercised) against the
+    # fake instead of being bypassed by the patch. A fresh cache per test:
+    # the module-level cache would otherwise outlive this fixture and leak
+    # one test's FakeNode data into the next.
+    monkeypatch.setattr(node_module, "fetch_node_info", fake.fetch_node_info)
+    monkeypatch.setattr(node_module, "_node_info_cache", None)
     # no real backoff in tests - individual tests only care whether
     # _confirm_payment eventually succeeds or gives up, never how long
     monkeypatch.setattr(router_module, "_CONFIRMATION_RETRY_DELAYS_SECONDS", ())
-    monkeypatch.setattr(frontend_module, "fetch_node_info", fake.fetch_node_info)
     monkeypatch.setattr(signing_module, "fetch_node_info", fake.fetch_node_info)
     monkeypatch.setattr(signing_module, "sign_message", fake.sign_message)
     return fake

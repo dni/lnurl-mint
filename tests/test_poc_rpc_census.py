@@ -7,6 +7,14 @@ call" was observed once as 2 total instead of 3, then flaked green), so
 this file re-measures everything from scratch with counters on all eight
 node RPCs and asserts exact per-request deltas.
 
+Update (2026-08-18): GET /'s and the mint-address endpoint's getinfo calls
+are no longer 1:1 with requests - both now go through
+node.cached_fetch_node_info, a shared 1h in-process cache (see node.py) -
+so this file's own getinfo assertions were updated to match rather than
+left as a stale "no caching" pin. mint_pubkey's getinfo (GET /w, via
+signing.py) is deliberately still live/uncached, and every other RPC here
+is unrelated to node info entirely - both remain exactly 1:1 as before.
+
 All local/safe: FakeNode + TestClient + throwaway db.
 """
 
@@ -16,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import lnurl_mint.frontend as frontend_module
+import lnurl_mint.node as node_module
 import lnurl_mint.router as router_module
 import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
@@ -51,6 +60,13 @@ class RpcCensus:
             for module in (router_module, frontend_module, signing_module):
                 if getattr(module, name, None) is not None and name in module.__dict__:
                     monkeypatch.setattr(module, name, counting)
+            if name == "fetch_node_info":
+                # router.py/frontend.py no longer hold their own
+                # fetch_node_info reference - they call
+                # node.cached_fetch_node_info, which reaches the fake via
+                # node.py's own module-global fetch_node_info name (see
+                # conftest.py's node fixture) - counted there instead
+                monkeypatch.setattr(node_module, "fetch_node_info", counting)
 
     def deltas(self) -> dict[str, int]:
         delta = {name: self.counts[name] - self._snapshot[name] for name in RPC_NAMES}
@@ -66,11 +82,14 @@ def census(node: FakeNode, monkeypatch: pytest.MonkeyPatch) -> RpcCensus:
     return RpcCensus(node, monkeypatch)
 
 
-def test_frontend_index_one_getinfo_per_request(client: TestClient, census: RpcCensus):
-    # GET / renders the node table live on every request - no caching.
-    for _ in range(3):
+def test_frontend_index_getinfo_cached_across_requests(client: TestClient, census: RpcCensus):
+    # GET / renders the node table via node.cached_fetch_node_info - only
+    # the first request within the 1h TTL actually hits the funding source
+    assert client.get("/").status_code == 200
+    assert census.deltas() == {"fetch_node_info": 1}
+    for _ in range(2):
         assert client.get("/").status_code == 200
-        assert census.deltas() == {"fetch_node_info": 1}
+        assert census.deltas() == {}
     # static asset: no RPC at all
     assert client.get("/favicon.svg").status_code == 200
     assert census.deltas() == {}

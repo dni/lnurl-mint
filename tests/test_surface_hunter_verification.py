@@ -10,8 +10,13 @@
   the disabled case (the fix's off switch) is pinned in
   test_poc_verify_race.py.
 - P2/F-5: unauthenticated endpoints amplify into funding-source RPCs with
-  no caching (availability concern, unchanged by this round of fixes -
-  pinned as a census so future caching work can flip the expectations).
+  no caching (availability concern) - GET /'s getinfo is the flip this
+  file's own comment anticipated: it now goes through
+  node.cached_fetch_node_info (2026-08-18, a shared 1h in-process cache),
+  so repeated requests within the TTL cost nothing further. mint_pubkey's
+  getinfo (GET /w, signing.py) is deliberately still live/uncached, and
+  /verify's settlement polling is unrelated to node info entirely - both
+  remain exactly 1:1 with requests, unchanged.
 - P6/F-4: fee_percent_ppm beyond the validated bound can no longer reach
   _min_sendable_msat through Settings at all, and the function's own
   iteration cap converts even a post-construction mutation into a raised
@@ -87,7 +92,9 @@ def test_p1_verify_hands_note_secret_to_anyone_with_payment_hash_when_enabled(
     assert victim_check["reason"] == "Note already spent."
 
 
-def test_p2_rpc_amplification_no_caching(client: TestClient, node: FakeNode, mint_note, monkeypatch):
+def test_p2_rpc_amplification_getinfo_now_cached_mint_pubkey_still_not(
+    client: TestClient, node: FakeNode, mint_note, monkeypatch
+):
     # verify must be served at all for its RPC cost to be exercised
     monkeypatch.setattr(settings, "verify_enabled", True)
     calls = {"info": 0, "settled": 0}
@@ -101,26 +108,34 @@ def test_p2_rpc_amplification_no_caching(client: TestClient, node: FakeNode, min
         calls["settled"] += 1
         return await orig_settled(payment_hash, config)
 
-    import lnurl_mint.frontend as frontend_module
+    import lnurl_mint.node as node_module
     import lnurl_mint.router as router_module
     import lnurl_mint.signing as signing_module
 
-    monkeypatch.setattr(frontend_module, "fetch_node_info", counting_info)
+    # node.cached_fetch_node_info (GET /, frontend.py) reaches the fake via
+    # node.py's own module-global fetch_node_info name, not a per-module
+    # import like the other RPCs here - see conftest.py's node fixture
+    monkeypatch.setattr(node_module, "fetch_node_info", counting_info)
     monkeypatch.setattr(signing_module, "fetch_node_info", counting_info)
     monkeypatch.setattr(router_module, "is_invoice_settled", counting_settled)
 
-    # 1 request to GET / -> 1 getinfo RPC, every time (no cache)
+    # GET / -> cached (node.cached_fetch_node_info, 1h TTL): only the first
+    # of these two requests actually reaches the funding source
     client.get("/")
     client.get("/")
-    assert calls["info"] == 2
+    assert calls["info"] == 1
 
-    # GET /w on an outstanding note -> mint_pubkey -> another getinfo RPC
+    # GET /w on an outstanding note -> mint_pubkey (signing.py) -> a live
+    # getinfo RPC, deliberately uncached, every single time
     k1 = mint_note(10_000)
+    client.get(f"/w?k1={k1}")
+    assert calls["info"] == 2
     client.get(f"/w?k1={k1}")
     assert calls["info"] == 3
 
     # an unsettled pending mint polled via /verify -> 1 RPC per poll, forever
-    # (no negative caching even after the node-side invoice would expire)
+    # (no negative caching even after the node-side invoice would expire) -
+    # a different RPC entirely, unaffected by node-info caching
     client.get("/p/cb?amount=50000")
     ph = sha256(node.last_preimage).hexdigest()
     settled_before = calls["settled"]

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from . import __version__
 from .config import settings
-from .node import fetch_node_info
+from .node import cached_fetch_node_info
 from .router import max_mintable_msat
 
 frontend_router = APIRouter()
@@ -88,6 +88,8 @@ $theme_color_meta
   td.mono { font-family: ui-monospace, monospace; word-break: break-all; }
   td.value-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
   td.value-row span { word-break: break-all; }
+  td a { color: #e6e4dd; text-decoration: underline; }
+  td a:hover { color: #fff; }
   .copy-sm {
     flex: none; display: inline-flex; align-items: center; justify-content: center;
     width: 1.6rem; height: 1.6rem; padding: 0;
@@ -162,7 +164,15 @@ NODE_SECTION = Template(
     <tr><td>Channels</td><td class="mono">$num_channels</td></tr>
     <tr><td>Peers</td><td class="mono">$num_peers</td></tr>
     <tr><td>Capacity</td><td class="mono">$capacity</td></tr>
+    $explorers_row
   </table>"""
+)
+
+EXPLORERS_ROW = Template(
+    """<tr><td>Explorers</td><td class="value-row">"""
+    """<a href="https://mempool.space/lightning/node/$pubkey" target="_blank" rel="noopener">mempool.space</a>"""
+    """<a href="https://amboss.space/node/$pubkey" target="_blank" rel="noopener">amboss.space</a>"""
+    """</td></tr>"""
 )
 
 LIMITS_SECTION = Template(
@@ -234,7 +244,7 @@ async def _node_section() -> tuple[str, str | None]:
     if not funding_source.backend:
         return '<p class="muted">No funding source configured.</p>', None
     try:
-        node = await fetch_node_info(funding_source)
+        node = await cached_fetch_node_info(funding_source)
     except Exception:
         return '<p class="muted">Funding source node is unreachable.</p>', None
     # node.uri is "pubkey@host:port" once the node has an announced address,
@@ -247,6 +257,10 @@ async def _node_section() -> tuple[str, str | None]:
     # unescaped, so nothing malformed can reach this point in the first place
     color = node.color
     color_row = COLOR_ROW.substitute(color=color, text_color=_contrast_text_color(color)) if color else ""
+    # only shown once there's an actual pubkey to link to - a node whose
+    # uri is unknown (unreachable partway through, or truly bare) has
+    # nothing for these explorers to look up
+    explorers_row = EXPLORERS_ROW.substitute(pubkey=html.escape(pubkey)) if pubkey else ""
     section = NODE_SECTION.substitute(
         alias=html.escape(node.alias or "-"),
         color_row=color_row,
@@ -256,6 +270,7 @@ async def _node_section() -> tuple[str, str | None]:
         connect_copy=_copy_button(connect_string, "Copy connect string"),
         num_channels=node.num_channels,
         num_peers=node.num_peers,
+        explorers_row=explorers_row,
         capacity=_format_sats(node.capacity),
     )
     return section, color
