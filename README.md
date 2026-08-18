@@ -10,7 +10,7 @@ LUD-06 invoice (the payment preimage *is* the note), circulates offline as
 `lnurlw://<host>/w?k1=<k1>`, and can be rotated, split, merged, or melted back
 to a BOLT-11 payment. Redeem one with [lnurl-wallet](https://github.com/dni/lnurl-wallet),
 a reference wallet implementation (hosted at
-[dni.github.io/lnurl-wallet](https://dni.github.io/lnurl-wallet)).
+[wallet.lnurlcash.com](https://wallet.lnurlcash.com)).
 
 ## Endpoints
 

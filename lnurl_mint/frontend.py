@@ -118,7 +118,7 @@ $theme_color_meta
   <button class="copy" data-copy="$address" title="Copy lightning address">&#9889; $address</button>
   <p class="hint">
     After paying, redeem your bearer note at
-    <a href="https://dni.github.io/lnurl-wallet" target="_blank" rel="noopener">dni.github.io/lnurl-wallet</a>
+    <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
     &mdash; enter the mint's lightning address (<code>$address</code>) and the payment preimage.
   </p>
   $tor_section
