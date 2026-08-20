@@ -163,11 +163,14 @@
               # LUD-06 payRequest works without a funding source configured
               # (no bare /p since #14 - the well-known alias is the only
               # payRequest entry point; `_` is the reserved bare-domain name)
-              machine.succeed("curl -sf http://localhost:8111/.well-known/lnurlp/_ | grep -q withdrawLink")
+              # (grep without -q: -q exits on first match and closes the
+              # pipe, curl dies with SIGPIPE (exit 23), and the driver's
+              # pipefail turns a PASSING match into a flaky failure)
+              machine.succeed("curl -sf http://localhost:8111/.well-known/lnurlp/_ | grep withdrawLink")
               # the mutating callback correctly reports the missing funding source
-              machine.succeed("curl -sf 'http://localhost:8111/p/cb?amount=50000' | grep -q 'not configured'")
+              machine.succeed("curl -sf 'http://localhost:8111/p/cb?amount=50000' | grep 'not configured'")
               # the frontend one-pager renders
-              machine.succeed("curl -sf http://localhost:8111/ | grep -q lnurl-mint")
+              machine.succeed("curl -sf http://localhost:8111/ | grep lnurl-mint")
             '';
           };
         }
