@@ -14,6 +14,11 @@ Options under test:
   D  A + hash-keyed informational GET (poll /w by sha256(k1), never k1)
   E  blinded signatures (chaumian model)
   F  B + D
+  G  locked notes - a second ASSET CLASS, not a bearer variant: the k1
+     stays a short plaintext secret, but redemption requires an LUD-04
+     signature from the LUD-05/LUD-13 linkingKey registered at
+     mint/rotate time. Signature-gated, so no ciphertext in URLs
+     anywhere. Scored separately below - the trades differ by note type.
 
 Scorecard (+ = attack fails / property holds, - = attack succeeds):
 
@@ -27,10 +32,27 @@ Scorecard (+ = attack fails / property holds, - = attack succeeds):
   T7 legacy LUD-03 melt                       +   +   -   +   +   +   melt tests in test_lnurlcash.py / test_verify.py
   T8 first-contact offline verify             -   -   -   -   -   -   analytical: needs mintPubkey on record -
                                                                         a spec-level gap, no endpoint to hit
-  T9 undecryptable-comment semantics          ?   ?   ?   ?   ?   ?   analytical: spec must choose fail-closed
-                                                                        (reject at /p/cb) or fallback (k1=P, no
-                                                                        verify) - and wallets need to know which
+  T9 comment silently ignored today           -   +   -   -   -   +   test_t9_..., below
   T10 merge URL budget                        +   +   -   +   +   +   test_t10_...
+  T11 offline handoff                         +   +   +   +   +   +   structural: no endpoint - the bearer
+                                                                        property itself (the spec's
+                                                                        Offline circulation section)
+
+Option G (locked notes) against the same scenarios - note where it wins
+and what it costs:
+  T1/T2 + : the wallet authenticates at /p/cb, so the note is locked to
+    its linkingKey from birth - a racer holding only P cannot redeem, no
+    comment-secret needed for these notes
+  T3/T4 + : a logged k1 is useless without the key
+  T5    + : the ONLY option that beats the at-rest axiom - precisely
+    because it gives up the property the axiom protects
+  T6    - : the operator knows exactly which key owns which notes
+  T7    - : a plain LUD-03 wallet cannot lnurl-auth - no legacy story
+  T11   - : offline handoff dies; transfer needs an online re-lock via
+    the mint. That is the whole price: locked notes are registered
+    claims, not cash. Bearer core (B/D) and locked notes (G) are
+    complements, not competitors - ship the bearer-side race fixes now,
+    spec G as the extension for claim-check use cases.
 
 C's three '-' marks in T1/T2/T3 all come from the same place: encrypting
 to the mint is a PUBLIC operation (mintPubkey is advertised), so a racer
@@ -38,7 +60,22 @@ wraps a leaked preimage himself and replays it, and a logged "p" redeems
 exactly like a logged k1 - the mint honors the ciphertext, so the
 ciphertext IS the note. Re-encrypting a bearer credential to the party
 that redeems it never shrinks its exposure set; the only encryption that
-helps is encrypting to the HOLDER, which kills bearer-ness.
+helps is encrypting to the HOLDER, which kills bearer-ness (G takes that
+trade deliberately, via signatures rather than ciphertext).
+
+Seed-recoverable notes (no protocol change beyond D needed): a WALLET
+that derives its note secrets deterministically from its seed (BIP32,
+reusing LUD-05's own m/138'/HMAC(domain) path trick, plus a counter) can
+restore outstanding notes from the seed alone: re-derive candidates,
+hash them, look them up by sha256 - option D doubles as the restore API.
+Freshly minted notes (k1 = the mint-generated preimage) are never
+seed-derived; they live in the wallet's Lightning payment history until
+rotate-on-receipt converts them into seed-derived ones - the security
+rule and the backup rule are the same act. Restore covers device loss,
+NOT theft: anyone who copied a circulating note may have spent it long
+before the restore runs. (Cashu's NUT-13 already does deterministic
+secrets - this is parity, not invention.) Pin ONE derivation convention
+in the spec, or wallets fragment and restores silently miss notes.
 
 Red/green policy (same convention as the hodl-invoice PoC,
 test_melt_restore_double_payout_poc.py): tests documenting an attack that
@@ -61,6 +98,7 @@ from hashlib import sha256
 
 from fastapi.testclient import TestClient
 
+from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from tests.conftest import fresh_secret
 
@@ -197,3 +235,25 @@ def test_t10_merge_url_budget_plaintext_fits_encrypted_does_not():
     blob = "A" * 124  # option-C encrypted k1, base64 - math in the docstring
     encrypted = base + "&".join(f"p={blob}" for _ in range(25)) + h_param
     assert len(encrypted) > 2000
+
+
+def test_t9_comment_is_silently_ignored_today(client: TestClient, node, monkeypatch):
+    """T9 - INVERTS WHEN option B (comment-secret) lands.
+
+    /p/cb takes no comment parameter, and unknown query params are dropped
+    silently - so a wallet that ALREADY sends a LUD-12 comment (expecting
+    comment-secret behavior) gets a bare k1=P note with verify advertised
+    anyway: a silent downgrade with no signal to the wallet. Option B must
+    replace this with defined semantics - fail-closed (reject the callback)
+    or fallback (k1=P and no verify for that invoice) - never silent."""
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    r = client.get("/p/cb?amount=50000&comment=this-will-be-ignored").json()
+    assert r.get("pr")
+
+    # today: the comment vanishes without a trace - verify is advertised as
+    # usual, and the settled preimage alone redeems the note
+    assert r.get("verify")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+    k1 = node.last_preimage.hex()
+    _, h = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
