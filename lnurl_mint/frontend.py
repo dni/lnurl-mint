@@ -62,7 +62,7 @@ PAGE = Template(
 $theme_color_meta
 <title>$title</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark; --mint: #2e9e6c; --mint-bright: #5fe3ac; }
   * { box-sizing: border-box; margin: 0; }
   body {
     font-family: system-ui, sans-serif;
@@ -75,6 +75,7 @@ $theme_color_meta
   .qr {
     background: #fff; border-radius: 12px; padding: 12px;
     width: 100%; max-width: 20rem; margin: 0 auto 1rem;
+    border: 2px solid var(--mint);
   }
   .qr svg { display: block; width: 100%; height: auto; }
   .copy {
@@ -83,13 +84,13 @@ $theme_color_meta
     font-family: ui-monospace, monospace; font-size: .8rem; cursor: pointer;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .copy:hover { border-color: #4a5060; }
-  .copy.copied { border-color: #7a9a65; }
+  .copy:hover { border-color: var(--mint); }
+  .copy.copied { border-color: var(--mint-bright); color: var(--mint-bright); }
   p.hint { color: #9a978f; font-size: .85rem; margin-top: 1.5rem; line-height: 1.5; }
-  p.hint a { color: #e6e4dd; }
+  p.hint a { color: var(--mint-bright); }
   p.hint code { font-family: ui-monospace, monospace; color: #e6e4dd; }
   h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
-       color: #9a978f; margin: 1.5rem 0 .5rem; }
+       color: var(--mint); margin: 1.5rem 0 .5rem; }
   table { width: 100%; border-collapse: collapse; font-size: .85rem; }
   td { padding: .35rem 0; border-top: 1px solid #2c303b; text-align: left; }
   td:first-child { color: #9a978f; white-space: nowrap; padding-right: 1rem; }
@@ -104,8 +105,8 @@ $theme_color_meta
     background: #1d2028; color: #e6e4dd; border: 1px solid #2c303b; border-radius: 6px;
     font-size: .8rem; line-height: 1; cursor: pointer;
   }
-  .copy-sm:hover { border-color: #4a5060; }
-  .copy-sm.copied { border-color: #7a9a65; }
+  .copy-sm:hover { border-color: var(--mint); }
+  .copy-sm.copied { border-color: var(--mint-bright); color: var(--mint-bright); }
   .color-swatch {
     display: inline-block; padding: .15rem .5rem; border-radius: 6px;
     font-family: ui-monospace, monospace; font-size: .8rem;
@@ -114,7 +115,7 @@ $theme_color_meta
   footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #2c303b;
            font-size: .8rem; color: #9a978f; }
   footer a { color: #9a978f; text-decoration: underline; }
-  footer a:hover { color: #e6e4dd; }
+  footer a:hover { color: var(--mint-bright); }
 </style>
 </head>
 <body>
