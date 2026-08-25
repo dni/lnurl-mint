@@ -51,17 +51,27 @@ W_RACERS = 8
 VERIFY_RACERS = 4
 
 
-def _fresh_settled_pending_mint(client: TestClient, node) -> tuple[str, str]:
+def _fresh_settled_pending_mint(client: TestClient, node, comment_secret: str | None = None) -> tuple[str, str]:
     """An invoice the payer has settled but no request has materialized yet:
-    (payment_hash, preimage_hex). The fake node reports it settled; the mints
-    row is still minted=0 until the first /w or /verify resolves it."""
-    resp = client.get(f"/p/cb?amount={AMOUNT}")
+    (payment_hash, k1). The fake node reports it settled; the mints row is
+    still minted=0 until the first /w or /verify resolves it.
+
+    `comment_secret`, when given, is a WALLET-generated secret to use as
+    LUD-25 comment protection (its hash is sent as `comment`) - needed for
+    any caller that wants /verify to actually serve something (see
+    router.get_pay_callback: verify is gated on it). The returned k1 is
+    then that secret, not the payment preimage - the note ends up keyed by
+    the comment hash instead (see settle_mint)."""
+    url = f"/p/cb?amount={AMOUNT}"
+    if comment_secret is not None:
+        url += f"&comment={sha256(bytes.fromhex(comment_secret)).hexdigest()}"
+    resp = client.get(url)
     assert resp.json().get("pr"), resp.text
     preimage = node.last_preimage
     ph = sha256(preimage).hexdigest()
     node.settled.add(ph)
     assert notes.pending_mint(ph) == AMOUNT
-    return ph, preimage.hex()
+    return ph, (comment_secret if comment_secret is not None else preimage.hex())
 
 
 def _race_http(ph: str, k1: str, w_racers: int, verify_racers: int) -> list[dict]:
@@ -87,9 +97,18 @@ def _race_http(ph: str, k1: str, w_racers: int, verify_racers: int) -> list[dict
 
 def test_a2_http_race_materializes_exactly_one_note(client: TestClient, node, monkeypatch):
     # /verify racers need the endpoint served - VERIFY_ENABLED=false (the
-    # test-env default) 404s it since the review
+    # test-env default) 404s it since the review, and (since LUD-25 comment
+    # protection) so does a no-comment mint regardless - so this mint uses
+    # one, which also means the note ends up keyed by the comment hash
+    # (note_id below), not the payment hash `ph` /verify racers poll by:
+    # the two now race two genuinely different lazy-settle entry points
+    # (_mint_settled vs _mint_settled_by_comment) against the same
+    # underlying settle_mint call, a strictly harder version of the
+    # original single-entry-point race.
     monkeypatch.setattr(settings, "verify_enabled", True)
-    ph, k1 = _fresh_settled_pending_mint(client, node)
+    secret = urandom(32).hex()
+    ph, k1 = _fresh_settled_pending_mint(client, node, comment_secret=secret)
+    note_id = sha256(bytes.fromhex(secret)).hexdigest()
 
     # widen the race window: every is_invoice_settled call parks here long
     # enough for all racers to pass the not-yet-settled checks together
@@ -124,12 +143,12 @@ def test_a2_http_race_materializes_exactly_one_note(client: TestClient, node, mo
         assert body["settled"] is True, body
 
     # ...and exactly one note ever came into existence: one row, one log line
-    assert notes.note_amount(ph) == AMOUNT
+    assert notes.note_amount(note_id) == AMOUNT
     assert notes.mint_settled(ph) is True
     assert log_calls == [(ph, AMOUNT)], log_calls
 
     # total outstanding value for this payment hash can never exceed one mint
-    row = notes.conn.execute("SELECT COUNT(*), SUM(amount_msat) FROM notes WHERE id = ?", (ph,)).fetchone()
+    row = notes.conn.execute("SELECT COUNT(*), SUM(amount_msat) FROM notes WHERE id = ?", (note_id,)).fetchone()
     assert row == (1, AMOUNT), row
 
 

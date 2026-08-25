@@ -5,10 +5,13 @@ instead of argued about in the abstract.
 
 Options under test:
   A  status quo (lnurl/luds PR #301 as drafted)
-  B  A + comment-secret: WALLET attaches a secret encrypted to the mint on
-     the payRequest (LUD-12 comment); the note's k1 becomes
-     "<secret>:<preimage>" and the public LUD-21 preimage alone no longer
-     redeems anything
+  B  A + comment-secret: WALLET attaches a secret's hash, in the clear, to
+     the mint on the payRequest (LUD-12 `comment = hex(sha256(secret))`,
+     no encryption); once settled the note's k1 becomes `secret` itself
+     (not a composite - see luds@cec741b, which simplified this from the
+     original encrypted/composite sketch below) and the public LUD-21
+     preimage alone no longer redeems anything. LANDED - see
+     router.get_pay_callback/NoteStore.mint_uses_comment.
   C  "?p= everywhere": every k1 replaced in transport by that k1 encrypted
      to the mint
   D  A + hash-keyed informational GET (poll /w by sha256(k1), never k1)
@@ -106,28 +109,58 @@ VALUE = 50_000
 
 
 def test_t2_routing_node_race_p_alone_is_sufficient(client: TestClient, mint_note):
-    """T2 - INVERTS WHEN option B (comment-secret) lands.
+    """T2 - deliberately NOT fixed for a WALLET that skips comment
+    protection: `mint_note` here mints with no `comment` at all, the
+    no-comment fallback LUD-25 keeps for backward compatibility with
+    wallets that don't (or choose not to) implement it. See
+    test_t2b_comment_protected_note_defeats_the_routing_node_race for the
+    protected case, where this exact attack now fails.
 
     VERIFY_ENABLED is off (the conftest default): no /verify leak at all.
     The attacker is a routing node on the mint payment's path - it learns
     the preimage P as the settling HTLC propagates back, no spec endpoint
-    involved. Today P alone redeems, so the attacker rotates the note onto
-    its own h the moment the payment settles, before the payer's wallet
-    does, and wins. Once k1 is "<secret>:<P>", the same request from
-    someone holding only P must fail - this test then asserts the opposite
-    and becomes the fix's regression test."""
+    involved. In the fallback, P alone redeems, so the attacker rotates the
+    note onto its own h the moment the payment settles, before the payer's
+    wallet does, and wins."""
     k1 = mint_note(VALUE)  # victim pays; P (returned here) is now the note
 
     # ATTACKER (any routing hop, holding only P): rotate immediately
     _, attacker_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&h={attacker_h}").json()
-    assert r["status"] == "OK"  # ATTACK SUCCEEDS today: P alone redeems
+    assert r["status"] == "OK"  # ATTACK SUCCEEDS in the no-comment fallback
     assert notes.note_amount(attacker_h) == VALUE
 
     # the legitimate payer arrives a moment later with the same P - too late
     _, victim_h = fresh_secret()
     r = client.get(f"/w/cb?k1={k1}&h={victim_h}").json()
     assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+
+
+def test_t2b_comment_protected_note_defeats_the_routing_node_race(client: TestClient, node):
+    """T2, protected case - a WALLET that DOES attach LUD-25 comment
+    protection is immune to this exact attack: the routing node still
+    learns P, same as always (ordinary Lightning routing, not a spec
+    endpoint), but P was never the note's k1 to begin with - the note is
+    keyed by the WALLET-held `secret` behind `comment` instead, which no
+    routing node ever sees."""
+    victim_secret, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    assert resp.json()["pr"]
+    p = node.last_preimage.hex()
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+
+    # ATTACKER (any routing hop, holding only P): rotating with it fails -
+    # P never became this note's k1
+    _, attacker_h = fresh_secret()
+    r = client.get(f"/w/cb?k1={p}&h={attacker_h}").json()
+    assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+    assert notes.note_amount(attacker_h) is None
+
+    # the legitimate payer's own held secret redeems the note, no race at all
+    _, victim_h = fresh_secret()
+    r = client.get(f"/w/cb?k1={victim_secret}&h={victim_h}").json()
+    assert r["status"] == "OK", r
+    assert notes.note_amount(victim_h) == VALUE
 
 
 def test_t3_informational_poll_leaks_the_live_note(client: TestClient, mint_note):
@@ -238,21 +271,27 @@ def test_t10_merge_url_budget_plaintext_fits_encrypted_does_not():
 
 
 def test_t9_comment_is_silently_ignored_today(client: TestClient, node, monkeypatch):
-    """T9 - INVERTS WHEN option B (comment-secret) lands.
+    """T9 - INVERTED: option B (comment-secret) landed, per the simplified
+    design in luds@cec741b (plain `comment = hex(sha256(secret))`, no
+    encryption, no composite k1 - superseding this file's original
+    "<secret>:<preimage>" sketch above).
 
-    /p/cb takes no comment parameter, and unknown query params are dropped
-    silently - so a wallet that ALREADY sends a LUD-12 comment (expecting
-    comment-secret behavior) gets a bare k1=P note with verify advertised
-    anyway: a silent downgrade with no signal to the wallet. Option B must
-    replace this with defined semantics - fail-closed (reject the callback)
-    or fallback (k1=P and no verify for that invoice) - never silent."""
+    /p/cb now takes a `comment` parameter with defined semantics, and picks
+    the fallback option this docstring anticipated over fail-closed: a
+    malformed or absent `comment` (like the bogus non-hex string here) is
+    never silently dropped in a way that changes what the wallet ends up
+    holding - it degrades to the ordinary k1=P note, but now visibly, by
+    withholding verify for that invoice (router.get_pay_callback) rather
+    than advertising it as usual."""
     monkeypatch.setattr(settings, "verify_enabled", True)
     r = client.get("/p/cb?amount=50000&comment=this-will-be-ignored").json()
     assert r.get("pr")
 
-    # today: the comment vanishes without a trace - verify is advertised as
-    # usual, and the settled preimage alone redeems the note
-    assert r.get("verify")
+    # the malformed comment falls back cleanly: no verify advertised (unlike
+    # the old silent-downgrade behavior this test used to pin), but the
+    # settled preimage still redeems the note exactly as the no-comment path
+    # always has
+    assert "verify" not in r
     node.settled.add(sha256(node.last_preimage).hexdigest())
     k1 = node.last_preimage.hex()
     _, h = fresh_secret()

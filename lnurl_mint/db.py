@@ -21,10 +21,14 @@ class NoteStore:
     outstanding and for how much, but lets nobody spend them. For a
     minted note that id is exactly the payment hash of the invoice that
     funded it, which is why `mints` needs no preimage column and
-    settling one is a plain insert under the same key. For a rotated,
-    split or merged note (LUD-25), the id is a hash the WALLET itself
-    generated and disclosed (`h`/`h2`) - this store (and this mint)
-    never has the secret to begin with, on top of never persisting it.
+    settling one is a plain insert under the same key - unless the
+    WALLET used LUD-25 comment protection, in which case the id is
+    instead the WALLET-chosen comment_hash it disclosed on the payRequest
+    (see create_mint/settle_mint), and the payment preimage never becomes
+    part of the note at all. For a rotated, split or merged note (LUD-25),
+    the id is a hash the WALLET itself generated and disclosed (`h`/`h2`)
+    - this store (and this mint) never has the secret to begin with, on
+    top of never persisting it.
     Burned notes are kept with spent=1 rather than deleted, so a
     replayed k1 fails as "already spent" instead of dangling.
 
@@ -61,7 +65,8 @@ class NoteStore:
                 " payment_hash TEXT PRIMARY KEY,"
                 " pr TEXT NOT NULL,"  # LUD-21 verify only, never the secret
                 " amount_msat INTEGER NOT NULL,"
-                " minted INTEGER NOT NULL DEFAULT 0)"
+                " minted INTEGER NOT NULL DEFAULT 0,"
+                " comment_hash TEXT)"  # LUD-25 comment protection, see create_mint
             )
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS melts ("
@@ -88,6 +93,10 @@ class NoteStore:
             # invisible to pending_melts until the next mark_pending call
             # touches them, same as any other pre-migration NULL
             self._add_column_if_missing(self._conn, "notes", "pending_payment_hash", "TEXT")
+            # a database from before LUD-25 comment protection has no
+            # `comment_hash` on `mints` - existing rows predate it entirely,
+            # so they get NULL, same as any mint that skipped it
+            self._add_column_if_missing(self._conn, "mints", "comment_hash", "TEXT")
             self._conn.commit()
         return self._conn
 
@@ -101,15 +110,33 @@ class NoteStore:
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_suffix}")
 
-    def create_mint(self, payment_hash: str, pr: str, amount_msat: int) -> None:
+    def create_mint(self, payment_hash: str, pr: str, amount_msat: int, comment_hash: str | None = None) -> None:
         """Record an invoice whose preimage will become a bearer note worth
         `amount_msat` once the invoice settles (see settle_mint). Only the
         payment hash and the invoice itself (`pr`, for LUD-21 verify) are
         stored - the preimage reaches the buyer through the Lightning
-        payment itself."""
+        payment itself.
+
+        `comment_hash` is LUD-25's comment protection (Protecting a freshly
+        minted note from a preimage race): a WALLET-chosen hash, carried on
+        the payRequest as `comment` per LUD-12, that the resulting note gets
+        credited under (as `k1=<secret>`) instead of the payment preimage
+        once this invoice settles - see settle_mint. Raises ValueError,
+        recording nothing, if `comment_hash` collides with an id already in
+        use, either an outstanding note or another mint's comment_hash - a
+        WALLET generating a fresh, unpredictable secret each time should
+        never hit this honestly."""
         with self._lock, self.conn:
+            if comment_hash is not None:
+                collision = self.conn.execute(
+                    "SELECT 1 FROM notes WHERE id = ? UNION SELECT 1 FROM mints WHERE comment_hash = ?",
+                    (comment_hash, comment_hash),
+                ).fetchone()
+                if collision:
+                    raise ValueError("comment already in use")
             self.conn.execute(
-                "INSERT INTO mints (payment_hash, pr, amount_msat) VALUES (?, ?, ?)", (payment_hash, pr, amount_msat)
+                "INSERT INTO mints (payment_hash, pr, amount_msat, comment_hash) VALUES (?, ?, ?, ?)",
+                (payment_hash, pr, amount_msat, comment_hash),
             )
 
     def pending_mint(self, payment_hash: str) -> int | None:
@@ -118,6 +145,28 @@ class NoteStore:
             "SELECT amount_msat FROM mints WHERE payment_hash = ? AND minted = 0", (payment_hash,)
         ).fetchone()
         return row[0] if row else None
+
+    def pending_mint_by_comment(self, comment_hash: str) -> tuple[str, int] | None:
+        """(payment_hash, amount_msat) of the not-yet-minted invoice whose
+        LUD-25 comment protection hash is `comment_hash`, if any - the
+        comment-keyed counterpart to pending_mint, used to lazily settle a
+        note looked up by its WALLET-chosen secret rather than by the
+        funding invoice's own payment hash (see router._mint_settled_by_comment)."""
+        row = self.conn.execute(
+            "SELECT payment_hash, amount_msat FROM mints WHERE comment_hash = ? AND minted = 0", (comment_hash,)
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def mint_uses_comment(self, payment_hash: str) -> bool:
+        """Whether the mint invoice `payment_hash` used LUD-25 comment
+        protection. Gates LUD-21 verify (router.verify_invoice): per spec,
+        `SERVICE` MUST NOT offer verify for a mint's payment hash in the
+        no-comment fallback, since there the payment preimage IS the note's
+        entire bearer secret and verify would hand it to anyone holding the
+        verify URL, not just the payer. Once a comment was used, the
+        preimage redeems nothing, so verify is unconditionally safe there."""
+        row = self.conn.execute("SELECT comment_hash FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
+        return bool(row and row[0] is not None)
 
     def mint_pr(self, payment_hash: str) -> str | None:
         """The invoice `payment_hash` was minted from (LUD-21 verify's `pr`
@@ -136,20 +185,27 @@ class NoteStore:
         return bool(row and row[0])
 
     def settle_mint(self, payment_hash: str) -> int | None:
-        """Turn a settled mint invoice into an outstanding note - its id is
-        the payment hash itself (sha256 of the preimage the buyer holds).
-        Returns its value, or None if a concurrent request already minted
-        it (in which case the note already exists and note_amount finds
-        it)."""
+        """Turn a settled mint invoice into an outstanding note. Its id is
+        the payment hash itself (sha256 of the preimage the buyer holds) -
+        unless this mint used LUD-25 comment protection, in which case it's
+        that mint's comment_hash instead (create_mint already checked it
+        doesn't collide with anything), and the preimage plays no further
+        role. Returns its value, or None if a concurrent request already
+        minted it (in which case the note already exists and note_amount
+        finds it)."""
         with self._lock, self.conn:
             cursor = self.conn.execute(
                 "UPDATE mints SET minted = 1 WHERE payment_hash = ? AND minted = 0", (payment_hash,)
             )
             if cursor.rowcount != 1:
                 return None
-            row = self.conn.execute("SELECT amount_msat FROM mints WHERE payment_hash = ?", (payment_hash,)).fetchone()
-            self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (payment_hash, row[0]))
-            return row[0]
+            row = self.conn.execute(
+                "SELECT amount_msat, comment_hash FROM mints WHERE payment_hash = ?", (payment_hash,)
+            ).fetchone()
+            amount_msat, comment_hash = row
+            note_id = comment_hash if comment_hash is not None else payment_hash
+            self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
+            return amount_msat
 
     def note_amount(self, note_id: str) -> int | None:
         """Value of the outstanding (unspent) note with id `note_id`

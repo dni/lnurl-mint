@@ -172,8 +172,10 @@ def test_verify_census_unsettled_mint_polls_forever(client: TestClient, node: Fa
     # an unpaid mint invoice polled via /verify: 1 is_invoice_settled RPC
     # per poll, forever - no negative caching, and (checked live against a
     # real node) this continues even after the invoice would have expired
-    # node-side.
-    client.get("/p/cb?amount=50000")
+    # node-side. Comment protection (LUD-25) is what gets verify served at
+    # all here - see router.get_pay_callback.
+    _, comment = fresh_secret()
+    client.get(f"/p/cb?amount=50000&comment={comment}")
     ph = sha256(node.last_preimage).hexdigest()
     census.deltas()  # discard create_invoice
     for _ in range(5):
@@ -186,8 +188,10 @@ def test_verify_census_settled_mint_preimage_per_poll(client: TestClient, node: 
     # once settled, the settlement probe short-circuits on the local minted
     # flag - but the preimage is "fetched live, never cached" by design, so
     # every poll of a settled mint still costs 1 invoice_preimage RPC,
-    # forever.
-    client.get("/p/cb?amount=50000")
+    # forever. Comment protection (LUD-25) is what gets verify served at
+    # all here - see router.get_pay_callback.
+    _, comment = fresh_secret()
+    client.get(f"/p/cb?amount=50000&comment={comment}")
     ph = sha256(node.last_preimage).hexdigest()
     census.deltas()
     node.settled.add(ph)
