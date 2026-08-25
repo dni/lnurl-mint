@@ -6,7 +6,13 @@ from pydantic import BaseModel
 class LnurlPayResponse(BaseModel):
     """LUD-06 payRequest, extended with lnurlcash's `withdrawLink` - the raw
     (LUD-17) URL of the withdrawRequest endpoint that will recognize this
-    mint's payment preimages as bearer notes."""
+    mint's payment preimages as bearer notes.
+
+    `commentAllowed` (LUD-12) advertises room for LUD-25's comment
+    protection: a WALLET attaches `comment=hex(sha256(secret))`, a bare
+    hex-encoded 32-byte hash, to close the preimage race described in the
+    spec's Security considerations (see router.get_pay_callback) - 64
+    hex chars, exactly what's advertised here."""
 
     tag: Literal["payRequest"] = "payRequest"
     callback: str
@@ -14,6 +20,7 @@ class LnurlPayResponse(BaseModel):
     maxSendable: int
     metadata: str
     withdrawLink: str
+    commentAllowed: int = 64
 
 
 class LnurlPayActionResponse(BaseModel):

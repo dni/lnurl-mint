@@ -16,14 +16,32 @@ def test_verify_url_absent_by_default(client: TestClient):
 
 def test_verify_url_advertised_when_enabled(client: TestClient, node, monkeypatch):
     monkeypatch.setattr(settings, "verify_enabled", True)
-    data = client.get("/p/cb?amount=5000").json()
+    # verify is only advertised for a mint that used LUD-25 comment
+    # protection - see test_verify_url_absent_without_comment below
+    _, comment = fresh_secret()
+    data = client.get(f"/p/cb?amount=5000&comment={comment}").json()
     payment_hash = sha256(node.last_preimage).hexdigest()
     assert data["verify"] == f"http://testserver/verify/{payment_hash}"
 
 
-def test_verify_reports_unsettled_before_payment(client: TestClient, node, monkeypatch):
+def test_verify_url_absent_without_comment(client: TestClient, node, monkeypatch):
+    # per LUD-25's Security considerations, SERVICE MUST NOT offer verify
+    # in the no-comment fallback: there the preimage IS the note's entire
+    # bearer secret, and verify would hand it to anyone holding the URL
     monkeypatch.setattr(settings, "verify_enabled", True)
     data = client.get("/p/cb?amount=5000").json()
+    assert "verify" not in data
+    payment_hash = sha256(node.last_preimage).hexdigest()
+    assert client.get(f"/verify/{payment_hash}").json() == {"status": "ERROR", "reason": "Not found"}
+    node.settled.add(payment_hash)
+    # ...even after settlement, when the preimage would otherwise be served
+    assert client.get(f"/verify/{payment_hash}").json() == {"status": "ERROR", "reason": "Not found"}
+
+
+def test_verify_reports_unsettled_before_payment(client: TestClient, node, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    _, comment = fresh_secret()
+    data = client.get(f"/p/cb?amount=5000&comment={comment}").json()
     payment_hash = sha256(node.last_preimage).hexdigest()
 
     result = client.get(f"/verify/{payment_hash}").json()
@@ -33,7 +51,8 @@ def test_verify_reports_unsettled_before_payment(client: TestClient, node, monke
 
 def test_verify_reports_settled_after_payment(client: TestClient, node, monkeypatch):
     monkeypatch.setattr(settings, "verify_enabled", True)
-    data = client.get("/p/cb?amount=5000").json()
+    _, comment = fresh_secret()
+    data = client.get(f"/p/cb?amount=5000&comment={comment}").json()
     payment_hash = sha256(node.last_preimage).hexdigest()
     node.settled.add(payment_hash)
 
@@ -43,10 +62,11 @@ def test_verify_reports_settled_after_payment(client: TestClient, node, monkeypa
 
 def test_verify_withholds_the_preimage_before_settlement(client: TestClient, node, monkeypatch):
     monkeypatch.setattr(settings, "verify_enabled", True)
-    # the payment preimage IS the bearer note's spend secret - it's only
-    # handed over once settled, so an unsettled invoice's verify response
-    # must not leak it even though the node already knows it
-    client.get("/p/cb?amount=5000")
+    # plain LUD-21 behavior, orthogonal to comment protection: the
+    # preimage is only handed over once settled, so an unsettled invoice's
+    # verify response must not leak it even though the node already knows it
+    _, comment = fresh_secret()
+    client.get(f"/p/cb?amount=5000&comment={comment}")
     payment_hash = sha256(node.last_preimage).hexdigest()
 
     body = client.get(f"/verify/{payment_hash}").text
@@ -61,25 +81,33 @@ def test_verify_unknown_payment_hash_is_not_found(client: TestClient, monkeypatc
     assert result == {"status": "ERROR", "reason": "Not found"}
 
 
-def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, mint_note, monkeypatch):
+def test_verify_stays_settled_after_the_note_is_spent(client: TestClient, node, monkeypatch):
     monkeypatch.setattr(settings, "verify_enabled", True)
     # LUD-21 verify answers "was this invoice ever paid", not "is there a
     # spendable note right now" - those diverge once the note is rotated,
     # but the preimage - fetched live from the node, never cached - is
-    # still handed back regardless, since the node retains it indefinitely
-    k1 = mint_note(5000)
-    payment_hash = sha256(bytes.fromhex(k1)).hexdigest()
+    # still handed back regardless, since the node retains it indefinitely.
+    # Comment protection (LUD-25) is what gets verify served here at all
+    # (see get_pay_callback) - the note's actual k1 is `secret`, not the
+    # preimage this test checks verify keeps reporting.
+    secret, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount=5000&comment={comment}")
+    assert resp.json()["pr"]
+    preimage = node.last_preimage.hex()
+    payment_hash = sha256(node.last_preimage).hexdigest()
+    node.settled.add(payment_hash)
+
     result = client.get(f"/verify/{payment_hash}").json()
     assert result["settled"] is True
-    assert result["preimage"] == k1
+    assert result["preimage"] == preimage
 
     _, h = fresh_secret()
-    rotated = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    rotated = client.get(f"/w/cb?k1={secret}&h={h}").json()
     assert rotated["status"] == "OK"
 
     result = client.get(f"/verify/{payment_hash}").json()
     assert result["settled"] is True
-    assert result["preimage"] == k1
+    assert result["preimage"] == preimage
 
 
 def test_verify_endpoint_is_disabled_entirely_when_verify_enabled_is_false(client: TestClient, node):

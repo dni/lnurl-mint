@@ -156,7 +156,10 @@ def test_withdraw_callback_url_ignores_a_spoofed_host_header(client: TestClient,
 
 def test_verify_url_ignores_a_spoofed_host_header(client: TestClient, monkeypatch):
     monkeypatch.setattr(settings, "verify_enabled", True)
-    data = client.get("/p/cb?amount=5000", headers={"Host": "evil.example"}).json()
+    # verify is only advertised for a comment-protected mint (LUD-25) - see
+    # test_verify.py
+    _, comment = fresh_secret()
+    data = client.get(f"/p/cb?amount=5000&comment={comment}", headers={"Host": "evil.example"}).json()
     assert data["verify"].startswith("http://testserver/verify/")
     assert "evil.example" not in data["verify"]
 

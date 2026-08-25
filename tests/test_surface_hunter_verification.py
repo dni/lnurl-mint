@@ -5,9 +5,15 @@
   swap guard; the victim's mint materializes normally. (The exhaustive
   variant matrix - split h/h2, merge, settled-mint ids - lives in
   test_poc_a1_collision_griefing.py; this file keeps the canonical case.)
-- P1/F-3: /verify hands a settled mint's preimage to anyone holding the
-  payment_hash when VERIFY_ENABLED=true - spec-shaped, pinned honestly;
-  the disabled case (the fix's off switch) is pinned in
+- P1/F-3: FIXED (LUD-25 comment protection) - /verify used to hand a
+  settled mint's preimage to anyone holding the payment_hash when
+  VERIFY_ENABLED=true, and that preimage was the note's entire spend
+  secret. Now SERVICE refuses verify outright for any mint that skipped
+  `comment` (NoteStore.mint_uses_comment), and for one that used it the
+  disclosed preimage isn't the note's secret to begin with - see
+  test_p1_verify_no_longer_hands_out_the_no_comment_fallback_secret and
+  test_p1b_verify_is_harmless_once_comment_protection_is_used. The
+  VERIFY_ENABLED off switch itself is still pinned in
   test_poc_verify_race.py.
 - P2/F-5: unauthenticated endpoints amplify into funding-source RPCs with
   no caching (availability concern) - GET /'s getinfo is the flip this
@@ -60,36 +66,55 @@ def test_p3_rotate_onto_pending_mint_is_rejected(client: TestClient, node: FakeN
     assert notes.mint_settled(victim_ph) is True
 
 
-def test_p1_verify_hands_note_secret_to_anyone_with_payment_hash_when_enabled(
-    client: TestClient, node: FakeNode, monkeypatch
-):
-    # spec-shaped exposure, pinned honestly: with verify ON, the payment_hash
-    # (embedded in the BOLT-11 pr, visible to anyone who ever sees the
-    # invoice) suffices to fetch the note's spend secret remotely
+def test_p1_verify_no_longer_hands_out_the_no_comment_fallback_secret(client: TestClient, node: FakeNode, monkeypatch):
+    # FIXED by LUD-25 comment protection (router.get_pay_callback /
+    # NoteStore.mint_uses_comment): a mint that skipped `comment` falls back
+    # to k1=preimage, and that preimage IS the note's entire spend secret -
+    # so SERVICE now refuses verify for it outright, even with VERIFY_ENABLED
+    # on, instead of handing it to anyone who ever saw the invoice.
     monkeypatch.setattr(settings, "verify_enabled", True)
     resp = client.get("/p/cb?amount=50000")
-    pr = resp.json()["pr"]
+    assert "verify" not in resp.json()
     victim_preimage = node.last_preimage
     payment_hash = sha256(victim_preimage).hexdigest()
     node.settled.add(payment_hash)
 
-    import bolt11
+    assert client.get(f"/verify/{payment_hash}").json() == {"status": "ERROR", "reason": "Not found"}
 
-    assert bolt11.decode(pr).payment_hash == payment_hash
+    # the victim's own preimage, learned the ordinary way (their own
+    # Lightning payment), still redeems the note normally - the fallback
+    # note itself is unaffected, only the remote-disclosure endpoint is closed
+    _, victim_h = fresh_secret()
+    rotate = client.get(f"/w/cb?k1={victim_preimage.hex()}&h={victim_h}")
+    assert rotate.json()["status"] == "OK", rotate.text
+
+
+def test_p1b_verify_is_harmless_once_comment_protection_is_used(client: TestClient, node: FakeNode, monkeypatch):
+    # the complementary case: a WALLET that DOES use LUD-25 comment
+    # protection gets verify served, but the disclosed preimage is no
+    # longer the note's spend secret (the WALLET-held `secret` behind
+    # `comment` is), so an observer stealing it from /verify gets nothing
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    secret, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount=50000&comment={comment}")
+    assert resp.json().get("verify")
+    victim_preimage = node.last_preimage
+    payment_hash = sha256(victim_preimage).hexdigest()
+    node.settled.add(payment_hash)
+
     stolen = client.get(f"/verify/{payment_hash}").json()
     assert stolen["settled"] is True
     assert stolen["preimage"] == victim_preimage.hex()
 
-    # and can immediately rotate the note to their own secret, racing the
-    # legitimate payer's wallet to it (first rotater wins - a compliant
-    # wallet rotates at settlement and wins by construction; slow manual or
-    # custodial flows are the exposed ones - see README's observer race note)
+    # the stolen preimage redeems nothing - it was never the note's k1
     _, attacker_h = fresh_secret()
     rotate = client.get(f"/w/cb?k1={stolen['preimage']}&h={attacker_h}")
+    assert rotate.json() == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+
+    # only the WALLET-held secret does
+    _, victim_h = fresh_secret()
+    rotate = client.get(f"/w/cb?k1={secret}&h={victim_h}")
     assert rotate.json()["status"] == "OK", rotate.text
-    victim_check = client.get(f"/w?k1={victim_preimage.hex()}").json()
-    assert victim_check["status"] == "ERROR"
-    assert victim_check["reason"] == "Note already spent."
 
 
 def test_p2_rpc_amplification_getinfo_now_cached_mint_pubkey_still_not(
@@ -135,8 +160,11 @@ def test_p2_rpc_amplification_getinfo_now_cached_mint_pubkey_still_not(
 
     # an unsettled pending mint polled via /verify -> 1 RPC per poll, forever
     # (no negative caching even after the node-side invoice would expire) -
-    # a different RPC entirely, unaffected by node-info caching
-    client.get("/p/cb?amount=50000")
+    # a different RPC entirely, unaffected by node-info caching. Comment
+    # protection (LUD-25) is what gets verify served at all - see
+    # router.get_pay_callback.
+    _, comment = fresh_secret()
+    client.get(f"/p/cb?amount=50000&comment={comment}")
     ph = sha256(node.last_preimage).hexdigest()
     settled_before = calls["settled"]
     for _ in range(5):

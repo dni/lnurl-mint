@@ -257,6 +257,31 @@ def _note_id(k1: str) -> str:
     return sha256(bytes.fromhex(k1)).hexdigest()
 
 
+async def _mint_settled_by_comment(comment_hash: str) -> bool:
+    """Whether the LUD-25 comment-protected mint whose secret hashes to
+    `comment_hash` has settled - lazily materializes the resulting note
+    (keyed by `comment_hash` itself, see NoteStore.settle_mint) the first
+    time settlement is observed, mirroring _mint_settled's payment-hash
+    path but keyed by the WALLET-chosen secret hash instead. Used by
+    _note_amount_by_id as a fallback when `note_id` doesn't name a
+    payment hash directly - which is always the case once a comment was
+    used, since the note's id is then unrelated to the invoice that paid
+    for it."""
+    pending = notes.pending_mint_by_comment(comment_hash)
+    if pending is None:
+        return False
+    payment_hash, _ = pending
+    funding_source = settings.funding_source()
+    if not funding_source.backend:
+        return False
+    if not await is_invoice_settled(payment_hash, funding_source):
+        return False
+    net_amount_msat = notes.settle_mint(payment_hash)
+    if net_amount_msat is not None:
+        _log_mint_settled(payment_hash, net_amount_msat)
+    return True
+
+
 async def _mint_settled(payment_hash: str) -> bool:
     """Whether the mint invoice `payment_hash` has ever settled - checks
     the funding source live and materializes the note (NoteStore.settle_mint)
@@ -350,13 +375,23 @@ async def _melt_preimage(payment_hash: str) -> str | None:
 async def _note_amount_by_id(note_id: str) -> int | None:
     """Value of the outstanding note with id `note_id`, or None - either it
     was never minted, or it has already been spent (rotated/split/merged/
-    melted away)."""
+    melted away).
+
+    Tries `note_id` first as a mint payment hash (the ordinary, no-comment
+    case, where a note's id IS its funding invoice's payment hash), then as
+    a LUD-25 comment_hash (_mint_settled_by_comment) - the case for any
+    comment-protected mint, where the two are unrelated. Harmless either
+    way when `note_id` doesn't match either: _mint_settled itself only
+    ever matches a real payment hash, so trying it against a comment_hash
+    just costs one extra, cheap, local lookup."""
     amount_msat = notes.note_amount(note_id)
     if amount_msat is not None:
         return amount_msat
-    if not await _mint_settled(note_id):
-        return None
-    return notes.note_amount(note_id)
+    if await _mint_settled(note_id):
+        return notes.note_amount(note_id)
+    if await _mint_settled_by_comment(note_id):
+        return notes.note_amount(note_id)
+    return None
 
 
 async def _resolve_note(k1: str) -> tuple[str, int] | None:
@@ -528,14 +563,30 @@ async def get_mint_address(req: Request, username: str) -> LnurlMintAddressRespo
 
 
 @router.get("/p/cb", tags=["lnurlcash"])
-async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
+async def get_pay_callback(req: Request, amount: int, comment: str | None = None) -> LnurlPayActionResponse:
     """LUD-06 callback: returns an invoice for `amount` msat whose preimage
     this mint generated itself (see node.create_invoice) - once the invoice
     settles, that preimage is an outstanding bearer note worth `amount`
     minus the advertised mint fee, if any (see _mint_fee_msat).
 
+    `comment` (LUD-12) is LUD-25's comment protection (Protecting a freshly
+    minted note from a preimage race): a WALLET that sends a bare
+    hex-encoded 32-byte hash here is committing to a `secret` only it
+    knows, and once this invoice settles the resulting note is credited as
+    `k1=<secret>` instead of the payment preimage (see settle_mint) - the
+    preimage then redeems nothing, closing the routing-node preimage race
+    the spec's Security considerations describes. Anything else - no
+    `comment`, or one that isn't that exact shape - falls back to the
+    plain preimage-keyed note, per spec; `comment` is never rejected
+    outright for being the wrong shape, since a WALLET with no LNURLcash
+    support at all may send an ordinary LUD-12 comment here for unrelated
+    reasons.
+
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
-    no node of its own poll settlement status - see verify_invoice."""
+    no node of its own poll settlement status - see verify_invoice. Gated
+    on `comment` here too: per spec, SERVICE MUST NOT offer verify in the
+    no-comment fallback, since there the preimage verify would hand out IS
+    the note's entire bearer secret."""
     if settings.sunset_mint:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "This mint is sunsetting - minting is disabled.")
     if amount < settings.min_sendable_msat:
@@ -547,6 +598,7 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, f"Amount too low to mint a note (min {settings.min_mint_msat} msat net of fees)."
         )
+    comment_hash = comment if comment is not None and HEX32_PATTERN.match(comment) else None
     funding_source = _funding_source()
     try:
         pr, preimage = await create_invoice(amount, funding_source)
@@ -554,19 +606,22 @@ async def get_pay_callback(req: Request, amount: int) -> LnurlPayActionResponse:
         # exc's own text (backend error bodies, connection info, ...) is
         # never handed back on the wire - see log_internal_error
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, log_internal_error("Error creating invoice", exc))
-    # the preimage (the future bearer secret) reaches the buyer through the
-    # Lightning payment itself and is discarded here, per the spec's
-    # storing-hashes-not-secrets guidance - only the payment hash and the
-    # invoice itself (for LUD-21 verify) are stored. The invoice itself is
-    # for the full `amount` (what the payer actually pays); the note it
-    # produces is credited net of the mint fee.
+    # the preimage (the future bearer secret in the no-comment fallback)
+    # reaches the buyer through the Lightning payment itself and is
+    # discarded here, per the spec's storing-hashes-not-secrets guidance -
+    # only the payment hash and the invoice itself (for LUD-21 verify) are
+    # stored. The invoice itself is for the full `amount` (what the payer
+    # actually pays); the note it produces is credited net of the mint fee.
     payment_hash = sha256(preimage).hexdigest()
-    notes.create_mint(payment_hash, pr, net_amount_msat)
+    try:
+        notes.create_mint(payment_hash, pr, net_amount_msat, comment_hash)
+    except ValueError as exc:
+        raise HTTPException(HTTPStatus.BAD_REQUEST, str(exc))
     # built from settings, not req.url_for (which is Host-header-derived,
     # spoofable via a plain Host header even behind a proxy - see
     # config.py's own public_base_url docstring) - same as get_lnaddress
     base = settings.public_base_url(str(req.base_url))
-    verify = f"{base}/verify/{payment_hash}" if settings.verify_enabled else None
+    verify = f"{base}/verify/{payment_hash}" if settings.verify_enabled and comment_hash is not None else None
     return LnurlPayActionResponse(pr=pr, verify=verify)
 
 
@@ -600,19 +655,20 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
     are separate tables keyed by two different invoices' payment hashes,
     so a lookup can never accidentally match the wrong direction.
 
-    For a mint, `preimage`, once settled, IS the bearer note's spend secret
-    (see LUD-25's Minting a bearer note from a payRequest) - deliberately
-    returned anyway, fetched live from the funding source rather than
-    cached (see _mint_preimage), because a wallet with no node of its own
-    has no other way to learn it and claim the note. Per the spec's
-    Security considerations, that wallet MUST then rotate the note
-    immediately: `SERVICE`'s own node already is a permanent prior holder
-    of this secret, and the payment hash travels inside the invoice
-    itself, so ANY holder of the invoice (a bystander seeing the QR, a
-    screenshot, a log line) can win the note by polling verify and
-    rotating first. A spec-compliant wallet rotates the moment its
-    payment settles and wins that race by construction; manual or
-    custodial flows that don't are exposed for as long as they wait.
+    For a mint that skipped LUD-25 comment protection (see get_pay_callback),
+    `preimage`, once settled, IS the bearer note's spend secret (see
+    LUD-25's Minting a bearer note from a payRequest) - which is exactly
+    why this endpoint refuses to serve one for that mint's payment_hash at
+    all (see below): unlike the case a wallet with no node of its own
+    needs it, serving it here would hand the note to ANY holder of the
+    invoice (a bystander seeing the QR, a screenshot, a log line), not
+    just the payer, the instant it settles. A mint that used comment
+    protection has no such issue - `preimage` there redeems nothing, the
+    note's spend secret is the WALLET-held `secret` behind `comment`
+    instead - so `preimage` is served normally, fetched live from the
+    funding source rather than cached (see _mint_preimage), for whatever
+    ordinary proof-of-payment use a wallet with no node of its own has for
+    it.
 
     For a melt, `preimage` is simply that outgoing payment's own settlement
     proof (see _melt_preimage) - not a bearer secret at all, since the
@@ -624,6 +680,12 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
     pr = notes.mint_pr(payment_hash)
     if pr is not None:
+        # per spec, SERVICE MUST NOT offer verify for a mint's payment hash
+        # in the no-comment fallback - there `preimage` IS the bearer
+        # note's entire spend secret, and this endpoint is unauthenticated
+        # by design (see NoteStore.mint_uses_comment)
+        if not notes.mint_uses_comment(payment_hash):
+            raise HTTPException(HTTPStatus.NOT_FOUND, "Not found")
         return await _verify_response(payment_hash, pr, _mint_settled, _mint_preimage)
     pr = notes.melt_pr(payment_hash)
     if pr is not None:

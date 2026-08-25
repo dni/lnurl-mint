@@ -1,0 +1,158 @@
+"""LUD-25 comment protection (Protecting a freshly minted note from a
+preimage race - see luds@cec741b): a WALLET attaches
+`comment = hex(sha256(secret))` to a mint payment, and once it settles the
+resulting note is credited as `k1=<secret>` instead of the payment preimage
+`P` - closing the routing-node preimage race (see
+test_bearer_threat_suite_poc.py's T2/T2b) and, since `P` no longer redeems
+anything, making it safe for SERVICE to serve LUD-21 verify on that
+invoice too (see test_verify.py, test_poc_verify_race.py,
+test_surface_hunter_verification.py for the verify-gating side of this).
+
+This file covers the mint-side mechanics themselves: what a valid/invalid/
+absent comment does to the resulting note, informational-GET resolution by
+secret alone (no prior verify or rotate needed), the commentAllowed
+advertisement, and comment-hash collisions."""
+
+from hashlib import sha256
+
+from fastapi.testclient import TestClient
+
+from lnurl_mint.config import settings
+from lnurl_mint.db import notes
+from tests.conftest import FakeNode, fresh_secret
+
+VALUE = 21_000
+
+
+def test_pay_response_advertises_comment_allowed(client: TestClient):
+    data = client.get(f"/.well-known/lnurlp/{settings.username}").json()
+    # 64 hex chars - exactly a sha256 digest, the only shape this mint's
+    # comment protection recognizes (see router.HEX32_PATTERN)
+    assert data["commentAllowed"] >= 64
+
+
+def test_valid_comment_credits_the_note_under_the_secret_not_the_preimage(client: TestClient, node: FakeNode):
+    secret, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    assert resp.json()["pr"]
+    preimage = node.last_preimage.hex()
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+
+    # the note resolves under the secret...
+    data = client.get(f"/w?k1={secret}").json()
+    assert data["tag"] == "withdrawRequest"
+    assert data["maxWithdrawable"] == VALUE
+
+    # ...never under the raw preimage, which played no further role
+    assert client.get(f"/w?k1={preimage}").json() == {"status": "ERROR", "reason": "Unknown note."}
+    _, h = fresh_secret()
+    r = client.get(f"/w/cb?k1={preimage}&h={h}").json()
+    assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+
+
+def test_valid_comment_note_redeems_normally_by_secret(client: TestClient, node: FakeNode):
+    secret, comment = fresh_secret()
+    client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+
+    _, h = fresh_secret()
+    r = client.get(f"/w/cb?k1={secret}&h={h}").json()
+    assert r["status"] == "OK", r
+    assert notes.note_amount(h) == VALUE
+
+
+def test_missing_comment_falls_back_to_preimage_keyed_note(client: TestClient, node: FakeNode):
+    resp = client.get(f"/p/cb?amount={VALUE}")
+    assert resp.json()["pr"]
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+    preimage = node.last_preimage.hex()
+
+    data = client.get(f"/w?k1={preimage}").json()
+    assert data["tag"] == "withdrawRequest"
+    assert data["maxWithdrawable"] == VALUE
+
+
+def test_malformed_comment_falls_back_to_preimage_keyed_note(client: TestClient, node: FakeNode):
+    # not a bare hex-encoded 32-byte hash - per spec, this is never a hard
+    # error, it just doesn't engage comment protection
+    resp = client.get(f"/p/cb?amount={VALUE}&comment=not-a-hash")
+    assert resp.json()["pr"]
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+    preimage = node.last_preimage.hex()
+
+    data = client.get(f"/w?k1={preimage}").json()
+    assert data["tag"] == "withdrawRequest"
+    assert data["maxWithdrawable"] == VALUE
+
+
+def test_verify_advertised_only_with_a_valid_comment(client: TestClient, node: FakeNode, monkeypatch):
+    monkeypatch.setattr(settings, "verify_enabled", True)
+
+    _, comment = fresh_secret()
+    with_comment = client.get(f"/p/cb?amount={VALUE}&comment={comment}").json()
+    assert with_comment.get("verify")
+
+    no_comment = client.get(f"/p/cb?amount={VALUE}").json()
+    assert "verify" not in no_comment
+
+    malformed = client.get(f"/p/cb?amount={VALUE}&comment=nope").json()
+    assert "verify" not in malformed
+
+
+def test_informational_get_lazily_settles_a_comment_protected_mint_without_verify(client: TestClient, node: FakeNode):
+    """A WALLET need not touch /verify at all to claim a comment-protected
+    note - plain GET /w?k1=<secret> (the ordinary LUD-03 informational
+    query) must lazily materialize it too, exactly like the no-comment
+    fallback already does for a preimage (see _mint_settled_by_comment)."""
+    secret, comment = fresh_secret()
+    client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+
+    assert notes.note_amount(comment) is None  # not yet materialized
+    data = client.get(f"/w?k1={secret}").json()
+    assert data["maxWithdrawable"] == VALUE
+    assert notes.note_amount(comment) == VALUE  # now it is
+
+
+def test_unsettled_comment_protected_mint_is_not_yet_a_note(client: TestClient, node: FakeNode):
+    secret, comment = fresh_secret()
+    client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    # not settled - the fake node hasn't been told this payment_hash paid
+    assert client.get(f"/w?k1={secret}").json() == {"status": "ERROR", "reason": "Unknown note."}
+
+
+def test_comment_colliding_with_an_outstanding_note_is_rejected(client: TestClient, node: FakeNode, mint_note):
+    # attacker (or an unlucky WALLET) picks a comment hash that's already
+    # in use as an outstanding note's id - create_mint must refuse rather
+    # than let a later settle silently shadow or fail against that note
+    existing_k1 = mint_note(VALUE)
+    existing_note_id = sha256(bytes.fromhex(existing_k1)).hexdigest()
+    # mint_note only settles the invoice - materialize the note itself
+    # (lazy, via the informational GET) before the collision can be hit
+    assert client.get(f"/w?k1={existing_k1}").json()["maxWithdrawable"] == VALUE
+    resp = client.get(f"/p/cb?amount={VALUE}&comment={existing_note_id}")
+    assert resp.json() == {"status": "ERROR", "reason": "comment already in use"}
+    # the existing note is completely unaffected
+    assert notes.note_amount(existing_note_id) == VALUE
+
+
+def test_comment_colliding_with_another_pending_mint_is_rejected(client: TestClient, node: FakeNode):
+    _, comment = fresh_secret()
+    first = client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    assert first.json()["pr"]
+
+    second = client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    assert second.json() == {"status": "ERROR", "reason": "comment already in use"}
+
+
+def test_comment_protected_note_can_split_rotate_and_merge_like_any_other(client: TestClient, node: FakeNode):
+    secret, comment = fresh_secret()
+    client.get(f"/p/cb?amount={VALUE}&comment={comment}")
+    node.settled.add(sha256(node.last_preimage).hexdigest())
+
+    _, h = fresh_secret()
+    _, h2 = fresh_secret()
+    r = client.get(f"/w/cb?k1={secret}&h={h}&h2={h2}&amount=5000").json()
+    assert r["status"] == "OK", r
+    assert notes.note_amount(h) == 5000
+    assert notes.note_amount(h2) == VALUE - 5000
