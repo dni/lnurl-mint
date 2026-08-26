@@ -35,6 +35,7 @@ os.environ["MIN_SENDABLE_MSAT"] = "1000"
 os.environ["VERIFY_ENABLED"] = "false"
 
 import asyncio
+import threading
 import time
 from hashlib import sha256
 from os import urandom
@@ -50,6 +51,7 @@ import lnurl_mint.node as node_module
 import lnurl_mint.router as router_module
 import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
+from lnurl_mint.db import notes
 from lnurl_mint.node import NodeInfo, PaymentFailed, PaymentResult
 from lnurl_mint.server import app
 
@@ -225,3 +227,35 @@ def mint_note(client: TestClient, node: FakeNode):
         return preimage.hex()
 
     return _mint
+
+
+def melt_in_background(client: TestClient, k1: str, pr: str, monkeypatch: pytest.MonkeyPatch) -> threading.Thread:
+    """Starts a melt in a background thread and blocks until it has
+    actually marked the note pending, before returning - deterministic,
+    unlike racing a fixed `time.sleep()` against thread startup and
+    request-dispatch overhead, which is exactly the kind of guess that
+    passes reliably on a quiet machine and flakes under load (thread
+    scheduling delay pushing past the sleep before the melt even reaches
+    mark_pending). node.pay_delay (still set by the caller) is what keeps
+    the pending window open long enough afterward for the caller's own
+    concurrent request to observe it - a single TestClient call otherwise
+    blocks until the whole request, background task included, is done, so
+    there is no other way to observe a melt mid-flight."""
+    result: dict = {}
+    marked_pending = threading.Event()
+    real_mark_pending = notes.mark_pending
+
+    def _mark_pending_and_signal(note_ids, payment_hash):
+        real_mark_pending(note_ids, payment_hash)
+        marked_pending.set()
+
+    monkeypatch.setattr(notes, "mark_pending", _mark_pending_and_signal)
+
+    def melt():
+        result["melt"] = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+
+    thread = threading.Thread(target=melt)
+    thread.start()
+    assert marked_pending.wait(timeout=5), "melt never marked the note pending"
+    thread.result = result  # type: ignore[attr-defined]
+    return thread
