@@ -1,5 +1,4 @@
 import json
-import threading
 from hashlib import sha256
 from os import urandom
 
@@ -9,6 +8,7 @@ import lnurl_mint.router as router_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
 from tests.conftest import FakeNode, fake_invoice, fresh_secret
+from tests.conftest import melt_in_background as _melt_in_background
 
 
 def note_value(client: TestClient, k1: str) -> int | None:
@@ -408,36 +408,6 @@ def test_failed_payment_restores_the_notes(client: TestClient, node: FakeNode, m
     # note becoming spendable again, never via this response
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
     assert note_value(client, k1) == 5000
-
-
-def _melt_in_background(client: TestClient, k1: str, pr: str, monkeypatch) -> threading.Thread:
-    """Starts a melt in a background thread and blocks until it has
-    actually marked the note pending, before returning - deterministic,
-    unlike racing a fixed `time.sleep()` against thread startup and
-    request-dispatch overhead, which is exactly the kind of guess that
-    passes reliably on a quiet machine and flakes under load (thread
-    scheduling delay pushing past the sleep before the melt even reaches
-    mark_pending). node.pay_delay (still set by the caller) is what keeps
-    the pending window open long enough afterward for the caller's own
-    concurrent request to observe it."""
-    result: dict = {}
-    marked_pending = threading.Event()
-    real_mark_pending = notes.mark_pending
-
-    def _mark_pending_and_signal(note_ids, payment_hash):
-        real_mark_pending(note_ids, payment_hash)
-        marked_pending.set()
-
-    monkeypatch.setattr(notes, "mark_pending", _mark_pending_and_signal)
-
-    def melt():
-        result["melt"] = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
-
-    thread = threading.Thread(target=melt)
-    thread.start()
-    assert marked_pending.wait(timeout=5), "melt never marked the note pending"
-    thread.result = result  # type: ignore[attr-defined]
-    return thread
 
 
 def test_pending_note_rejects_concurrent_operations(client: TestClient, node: FakeNode, mint_note, monkeypatch):

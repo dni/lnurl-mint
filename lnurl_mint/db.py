@@ -71,7 +71,8 @@ class NoteStore:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS melts ("
                 " payment_hash TEXT PRIMARY KEY,"
-                " pr TEXT NOT NULL)"  # the melted-into invoice, for LUD-25 melt verify
+                " pr TEXT NOT NULL,"  # the melted-into invoice, for LUD-25 melt verify
+                " settled INTEGER NOT NULL DEFAULT 0)"  # see mark_melt_settled
             )
             # add-a-column migrations for databases created before that
             # column existed - this mint has no other migration mechanism,
@@ -97,6 +98,12 @@ class NoteStore:
             # `comment_hash` on `mints` - existing rows predate it entirely,
             # so they get NULL, same as any mint that skipped it
             self._add_column_if_missing(self._conn, "mints", "comment_hash", "TEXT")
+            # a database from before mark_melt_settled has no `settled` on
+            # `melts` - existing rows predate it entirely; router._melt_settled
+            # falls back to a live is_payment_complete check whenever this is
+            # 0, so a pre-migration row (correctly defaulted to 0) just costs
+            # one such check the first time it's polled, same as before
+            self._add_column_if_missing(self._conn, "melts", "settled", "INTEGER NOT NULL DEFAULT 0")
             self._conn.commit()
         return self._conn
 
@@ -295,6 +302,32 @@ class NoteStore:
         None if this mint never recorded a melt for that payment_hash."""
         row = self.conn.execute("SELECT pr FROM melts WHERE payment_hash = ?", (payment_hash,)).fetchone()
         return row[0] if row else None
+
+    def mark_melt_settled(self, payment_hash: str) -> None:
+        """Records that this melt's outgoing payment has been positively
+        confirmed settled - called once (router._melt_pay/
+        reconcile_pending_melts) right alongside the finalize_melt that
+        burns its note(s) for good, since at that point this mint has
+        already independently established the outcome (either pay_invoice's
+        own success response, or a since-confirmed is_payment_complete
+        retry) and has no reason to re-derive it later.
+
+        This is what LUD-25 melt verify (router._melt_settled) checks
+        first, before ever re-querying the funding source: right after a
+        payment lands, a live is_payment_complete call can still lag or
+        answer inconsistently for a moment (a backend's own payment record
+        catching up asynchronously - see is_payment_complete's own
+        docstring), which would otherwise make verify report `settled:
+        false` for a melt this mint itself already knows completed."""
+        with self._lock, self.conn:
+            self.conn.execute("UPDATE melts SET settled = 1 WHERE payment_hash = ?", (payment_hash,))
+
+    def melt_settled(self, payment_hash: str) -> bool:
+        """Whether mark_melt_settled has already confirmed this melt
+        locally - the fast, authoritative path router._melt_settled checks
+        before falling back to a live is_payment_complete call."""
+        row = self.conn.execute("SELECT settled FROM melts WHERE payment_hash = ?", (payment_hash,)).fetchone()
+        return bool(row and row[0])
 
     def mark_pending(self, note_ids: list[str], payment_hash: str) -> None:
         """Reserve `note_ids` for an in-flight melt without burning them yet.

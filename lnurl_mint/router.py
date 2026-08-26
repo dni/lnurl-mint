@@ -183,6 +183,7 @@ async def _melt_pay(
                 notes.restore(note_ids)
                 return
             notes.finalize_melt(note_ids)
+            notes.mark_melt_settled(decoded.payment_hash)
             # routing fee unknown here - confirmed via is_payment_complete
             # (a status check), not pay_invoice's own response, which is the
             # only place either backend reports the fee actually paid
@@ -190,6 +191,8 @@ async def _melt_pay(
             return
 
         notes.finalize_melt(note_ids)
+        if decoded.has_payment_hash:
+            notes.mark_melt_settled(decoded.payment_hash)
         log_melt(note_ids, amount_msat, result.fee_msat)
     finally:
         # the attempt is over, whatever its outcome - drop the in-flight
@@ -241,6 +244,7 @@ async def reconcile_pending_melts(funding_source: LightningBackendConfig) -> Non
             # spent note's own value is no longer readable afterward
             amount_msat = sum(notes.note_amount(note_id) or 0 for note_id in note_ids)
             notes.finalize_melt(note_ids)
+            notes.mark_melt_settled(payment_hash)
             logging.info("reconcile: melt %s confirmed paid at boot - finalized", note_ids)
             # routing fee unknown here too, same reason as _melt_pay's own
             # is_payment_complete-confirmed path
@@ -340,13 +344,26 @@ async def _mint_preimage(payment_hash: str) -> str | None:
 
 async def _melt_settled(payment_hash: str) -> bool:
     """Whether a melt's outgoing payment (paying `payment_hash`) has
-    settled, for LUD-25's melt verify. Unlike _confirm_payment, which must
-    tell "confirmed not paid" apart from "can't tell yet" before a note is
-    ever restored or finalized, this is a read-only status check with no
-    note state to protect: still pending, a hodl HTLC held open, or a
-    momentary funding-source hiccup are all reported the same as "not
-    settled yet" rather than raised - a wrong answer here never burns or
-    restores anything, it only tells a third party to check back later."""
+    settled, for LUD-25's melt verify. Checks NoteStore.melt_settled first -
+    the local flag _melt_pay/reconcile_pending_melts already set once they
+    positively confirmed this exact melt and burned its note(s) for good -
+    before ever falling back to a live is_payment_complete call: right
+    after a payment lands, the funding source's own bookkeeping can still
+    lag or briefly answer inconsistently (e.g. cln's listpays reporting
+    "pending" for a moment after xpay itself already returned success), and
+    trusting that live call alone would then report `settled: false` for a
+    melt this mint already knows completed, even with the note long spent.
+
+    Only once the local flag is unset does this fall back to a live check
+    - still with the same read-only, no-note-state-to-protect treatment as
+    before: unlike _confirm_payment, which must tell "confirmed not paid"
+    apart from "can't tell yet" before a note is ever restored or
+    finalized, still pending, a hodl HTLC held open, or a momentary
+    funding-source hiccup are all reported the same as "not settled yet"
+    rather than raised - a wrong answer here never burns or restores
+    anything, it only tells a third party to check back later."""
+    if notes.melt_settled(payment_hash):
+        return True
     funding_source = settings.funding_source()
     if not funding_source.backend:
         return False

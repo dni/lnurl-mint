@@ -5,8 +5,8 @@ import bolt11
 from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
-from lnurl_mint.db import NoteStore
-from tests.conftest import fake_invoice, fresh_secret
+from lnurl_mint.db import NoteStore, notes
+from tests.conftest import fake_invoice, fresh_secret, melt_in_background
 
 
 def test_verify_url_absent_by_default(client: TestClient):
@@ -166,17 +166,47 @@ def test_melt_verify_reports_settled_and_a_matching_preimage_once_paid(
     assert result["preimage"] == node.melt_preimages[payment_hash].hex()
 
 
-def test_melt_verify_reports_unsettled_before_the_payment_completes(client: TestClient, node, mint_note, monkeypatch):
+def test_melt_verify_reports_unsettled_while_genuinely_pending(client: TestClient, node, mint_note, monkeypatch):
+    """Real in-flight state (not just an artificial FakeNode flag): the
+    melt has been accepted and its note marked pending, but pay_invoice
+    hasn't returned yet - see conftest.melt_in_background, since a single
+    TestClient call otherwise blocks until the whole request (background
+    task included) is done, leaving no other way to observe this window."""
     monkeypatch.setattr(settings, "verify_enabled", True)
     k1 = mint_note(5000)
     pr = fake_invoice(5000)
-    # node.payment_actually_completed left False - is_payment_complete
-    # reports "not yet", never trusted as a bearer secret before settlement
-    data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+    payment_hash = bolt11.decode(pr).payment_hash
+    node.pay_delay = 0.3
 
-    result = client.get(data["verify"]).json()
+    thread = melt_in_background(client, k1, pr, monkeypatch)
+    result = client.get(f"/verify/{payment_hash}").json()
     assert result == {"status": "OK", "settled": False, "pr": pr}
     assert "preimage" not in result
+    thread.join()
+    assert thread.result["melt"]["status"] == "OK"  # type: ignore[attr-defined]
+
+
+def test_melt_verify_reports_settled_immediately_once_finalized_even_if_the_node_lags(
+    client: TestClient, node, mint_note, monkeypatch
+):
+    """The bug this closes: once _melt_pay finalizes a melt (pay_invoice
+    itself already succeeded), verify must report settled right away via
+    NoteStore.mark_melt_settled - not by re-asking the funding source,
+    which right after a payment lands can still lag or answer
+    inconsistently. Pinned here by leaving node.payment_actually_completed
+    at its default False: a live is_payment_complete call would report
+    unsettled, but the melt already completed and the note is spent."""
+    monkeypatch.setattr(settings, "verify_enabled", True)
+    k1 = mint_note(5000)
+    pr = fake_invoice(5000)
+    payment_hash = bolt11.decode(pr).payment_hash
+    data = client.get(f"/w/cb?k1={k1}&pr={pr}").json()
+    assert data["status"] == "OK"
+    assert notes.note_spent(sha256(bytes.fromhex(k1)).hexdigest()) is True
+
+    assert node.payment_actually_completed is False  # the node's own live view lags
+    result = client.get(f"/verify/{payment_hash}").json()
+    assert result["settled"] is True
 
 
 def test_melt_verify_is_also_disabled_when_verify_enabled_is_false(client: TestClient, node, mint_note):
@@ -214,3 +244,22 @@ def test_mints_table_migrates_from_before_lud21(tmp_path):
     assert store.mint_pr("deadbeef") == ""
     store.create_mint("newhash", "lnbcrt1...", 3000)
     assert store.mint_pr("newhash") == "lnbcrt1..."
+
+
+def test_melts_table_migrates_from_before_mark_melt_settled(tmp_path):
+    # a database from before mark_melt_settled has a `melts` table with no
+    # `settled` column - existing rows predate it entirely, and must default
+    # to 0 (router._melt_settled then falls back to a live check for them,
+    # same as it always did)
+    db_path = str(tmp_path / "pre-settled.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE melts (payment_hash TEXT PRIMARY KEY, pr TEXT NOT NULL)")
+    conn.execute("INSERT INTO melts (payment_hash, pr) VALUES ('deadbeef', 'lnbcrt1...')")
+    conn.commit()
+    conn.close()
+
+    store = NoteStore(db_path)
+    assert store.melt_pr("deadbeef") == "lnbcrt1..."
+    assert store.melt_settled("deadbeef") is False
+    store.mark_melt_settled("deadbeef")
+    assert store.melt_settled("deadbeef") is True

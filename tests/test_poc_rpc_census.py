@@ -18,8 +18,10 @@ is unrelated to node info entirely - both remain exactly 1:1 as before.
 All local/safe: FakeNode + TestClient + throwaway db.
 """
 
+import time
 from hashlib import sha256
 
+import bolt11
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,7 +31,7 @@ import lnurl_mint.router as router_module
 import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from tests.conftest import FakeNode, fake_invoice, fresh_secret
+from tests.conftest import FakeNode, fake_invoice, fresh_secret, melt_in_background
 
 RPC_NAMES = (
     "create_invoice",
@@ -206,27 +208,43 @@ def test_verify_census_settled_mint_preimage_per_poll(client: TestClient, node: 
         assert census.deltas() == {"invoice_preimage": 1}
 
 
-def test_verify_census_melt_direction(client: TestClient, node: FakeNode, mint_note, census: RpcCensus):
+def test_verify_census_melt_direction(
+    client: TestClient, node: FakeNode, mint_note, census: RpcCensus, monkeypatch: pytest.MonkeyPatch
+):
     k1 = mint_note(10_000)
     invoice = fake_invoice(10_000)
-    melt_ph = __import__("bolt11").decode(invoice).payment_hash
-    assert client.get(f"/w/cb?k1={k1}&pr={invoice}").json()["status"] == "OK"
-    census.deltas()  # discard the melt's own pay_invoice
+    melt_ph = bolt11.decode(invoice).payment_hash
+    node.pay_delay = 0.3
 
-    # melt in-flight (not complete): 1 is_payment_complete per poll
+    thread = melt_in_background(client, k1, invoice, monkeypatch)
+    # melt_in_background only guarantees mark_pending has fired - give the
+    # background task a moment to actually reach (and start counting) its
+    # own pay_invoice call, deep inside its 0.3s pay_delay sleep, before
+    # establishing the baseline below
+    time.sleep(0.05)
+    census.deltas()  # discard whatever accrued getting the melt in flight
+
+    # melt genuinely in-flight (mark_pending fired, pay_invoice still
+    # running): NoteStore.melt_settled isn't set yet, so this still falls
+    # back to 1 is_payment_complete RPC per poll, same as before
     for _ in range(2):
         r = client.get(f"/verify/{melt_ph}")
         assert r.json()["settled"] is False
         assert census.deltas() == {"is_payment_complete": 1}
 
-    # melt complete: 1 is_payment_complete + 1 payment_preimage per poll -
-    # neither is ever cached
+    thread.join()
+    assert thread.result["melt"]["status"] == "OK"  # type: ignore[attr-defined]
+
+    # once _melt_pay finalizes (NoteStore.mark_melt_settled), `settled`
+    # is answered locally - zero RPCs, not re-derived from the funding
+    # source on every poll. `preimage` is still fetched live, never
+    # cached, so payment_preimage costs 1 RPC per poll regardless.
     node.payment_actually_completed = True
     for _ in range(2):
         r = client.get(f"/verify/{melt_ph}")
         assert r.json()["settled"] is True
         assert r.json()["preimage"] is not None
-        assert census.deltas() == {"is_payment_complete": 1, "payment_preimage": 1}
+        assert census.deltas() == {"payment_preimage": 1}
 
 
 def test_withdraw_callback_signing_rpcs(client: TestClient, node: FakeNode, mint_note, census: RpcCensus):
