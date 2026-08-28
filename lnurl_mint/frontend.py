@@ -122,17 +122,9 @@ $theme_color_meta
 <main>
   <h1>$title</h1>
   <p class="desc">$description</p>
-  <div class="qr">$qr_svg</div>
-  <button class="copy" data-copy="$lnurl" title="Copy LNURL">$lnurl</button>
-  <button class="copy" data-copy="$address" title="Copy lightning address">&#9889; $address</button>
-  <p class="hint">
-    After paying, redeem your bearer note at
-    <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
-    &mdash; enter the mint's lightning address (<code>$address</code>) and the payment preimage.
-  </p>
+  $pay_section
   $tor_section
-  <h2>Mint</h2>
-  $limits_section
+  $mint_section
   <h2>Node</h2>
   $node_section
   <footer>
@@ -155,6 +147,41 @@ $theme_color_meta
 </body>
 </html>
 """
+)
+
+PAY_SECTION = Template(
+    """<div class="qr">$qr_svg</div>
+  <button class="copy" data-copy="$lnurl" title="Copy LNURL">$lnurl</button>
+  <button class="copy" data-copy="$address" title="Copy lightning address">&#9889; $address</button>
+  <p class="hint">
+    After paying, redeem your bearer note at
+    <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
+    &mdash; enter the mint's lightning address (<code>$address</code>) and the payment preimage.
+  </p>"""
+)
+
+# What stands in its place once sunset_mint is on. A QR code here would
+# encode this mint's payRequest, and /p/cb refuses every one of those, so
+# the page would be handing out a scan whose only outcome is an error. The
+# note side is untouched by sunsetting, so this says what still works and
+# how to reach it.
+SUNSET_SECTION = Template(
+    """<p class="hint">
+    <strong>This mint is no longer issuing notes</strong>, so there is
+    nothing here to scan or pay.
+    <br><br>
+    A note it issued earlier is unaffected: check it, rotate it, merge
+    several into one, and melt into a Lightning invoice, all as before.
+    Open the note in any LNURLcash wallet, or at
+    <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
+    give this mint's address (<code>$address</code>) and the note's payment
+    preimage.
+  </p>"""
+)
+
+MINT_SECTION = Template(
+    """<h2>Mint</h2>
+  $limits_section"""
 )
 
 TOR_SECTION = Template(
@@ -205,9 +232,14 @@ def _tor_section(base: str) -> str:
     (ONION_URL), shown only when configured - and only when the current
     request isn't already using it, since public_base_url already returns
     the onion URL as the primary `base` in that case (see config.py), which
-    would make a second, identical block here redundant."""
+    would make a second, identical block here redundant. Empty while
+    sunsetting, for the reason in _pay_section."""
     onion_url = settings.onion_url
     if not onion_url or base.rstrip("/") == onion_url.rstrip("/"):
+        return ""
+    # a sunsetting mint refuses /p/cb over the onion exactly as it does over
+    # the clearnet, so this block would be the same dead invitation twice
+    if settings.sunset_mint:
         return ""
     onion_base = onion_url.rstrip("/")
     onion_host = urlparse(onion_base).hostname or onion_base
@@ -227,6 +259,32 @@ def _copy_button(value: str | None, title: str) -> str:
 
 def _format_sats(amount_msat: int) -> str:
     return f"{amount_msat // 1000:,} sats"
+
+
+def _pay_section(lnurl: str, address: str) -> str:
+    """The pay half of the page: QR code, LNURL, lightning address, and what
+    to do once the invoice settles. A sunsetting mint gets SUNSET_SECTION
+    instead - /p/cb rejects outright while sunset_mint is on (see
+    router.mint), so rendering a QR code of this mint's payRequest would be
+    offering the one thing the mint has stopped doing, and any wallet that
+    scanned it would get an error for its trouble."""
+    if settings.sunset_mint:
+        return SUNSET_SECTION.substitute(address=html.escape(address))
+    return PAY_SECTION.substitute(
+        qr_svg=_qr_svg(lnurl),
+        lnurl=lnurl,
+        address=html.escape(address),
+    )
+
+
+def _mint_section() -> str:
+    """The Mint table, and its heading. Both describe amounts a new note may
+    be minted for, so both go while sunsetting: there are no new notes, and
+    a floor and a ceiling on an impossible action are just two more numbers
+    to read past."""
+    if settings.sunset_mint:
+        return ""
+    return MINT_SECTION.substitute(limits_section=_limits_section())
 
 
 def _limits_section() -> str:
@@ -317,7 +375,9 @@ async def docs(req: Request) -> HTMLResponse:
 @frontend_router.get("/", include_in_schema=False)
 async def index(req: Request) -> HTMLResponse:
     """The one-pager: the mint's LNURL QR code (scan and pay to mint a
-    bearer note), its lightning address, and the funding-source node info."""
+    bearer note), its lightning address, and the funding-source node info.
+    While sunsetting, the mint half of that is replaced by what a holder of
+    an existing note can still do - see _pay_section."""
     base, host = settings.public_base_url_and_host(str(req.base_url))
     lnurl = lnurl_encode(f"{base}/.well-known/lnurlp/{settings.username}")
     address = f"{settings.username}@{host}"
@@ -326,12 +386,10 @@ async def index(req: Request) -> HTMLResponse:
     page = PAGE.substitute(
         title=html.escape(settings.title),
         description=html.escape(settings.description),
-        qr_svg=_qr_svg(lnurl),
-        lnurl=lnurl,
-        address=html.escape(address),
+        pay_section=_pay_section(lnurl, address),
         tor_section=_tor_section(base),
         theme_color_meta=theme_color_meta,
-        limits_section=_limits_section(),
+        mint_section=_mint_section(),
         node_section=node_section,
         version=html.escape(__version__),
     )

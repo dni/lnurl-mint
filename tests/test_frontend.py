@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 from lnurl_mint.config import settings
 from lnurl_mint.frontend import lnurl_encode
 
+ONION = "http://abcdefghijklmnop1234567890abcdefghijklmnop1234567890abcdefgh.onion"
+
 
 def lnurl_decode(lnurl: str) -> str:
     hrp, data = bech32_decode(lnurl.lower())
@@ -164,6 +166,44 @@ def test_index_max_amount_accounts_for_mint_fee(client: TestClient, node, monkey
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     response = client.get("/")
     assert f"{(settings.max_sendable_msat - 1000) // 1000:,} sats" in response.text
+
+
+def test_index_while_sunsetting_offers_nothing_to_pay(client: TestClient, node, monkeypatch):
+    """The page must not invite the one request the mint now refuses: /p/cb
+    rejects outright while sunsetting, so a QR code of this mint's payRequest
+    is a scan whose only outcome is an error."""
+    monkeypatch.setattr(settings, "sunset_mint", True)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "<svg" not in response.text
+    assert lnurl_encode(f"http://testserver/.well-known/lnurlp/{settings.username}") not in response.text
+    assert "After paying" not in response.text
+    # the mint limits describe an amount no new note can be minted for
+    assert "Min amount" not in response.text
+    assert "Max amount" not in response.text
+
+
+def test_index_while_sunsetting_says_what_a_holder_can_still_do(client: TestClient, node, monkeypatch):
+    monkeypatch.setattr(settings, "sunset_mint", True)
+    response = client.get("/")
+    assert "no longer issuing notes" in response.text
+    assert "melt" in response.text
+    # the address stays, because recovering a note at the hosted wallet asks
+    # for it alongside the payment preimage
+    assert f"{settings.username}@testserver" in response.text
+    assert "https://wallet.lnurlcash.com" in response.text
+    # everything that isn't about minting is untouched
+    assert settings.title in response.text
+    assert "fakenode" in response.text
+
+
+def test_index_while_sunsetting_drops_the_onion_pay_block(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "onion_url", ONION)
+    assert "Also via Tor" in client.get("/").text
+    monkeypatch.setattr(settings, "sunset_mint", True)
+    response = client.get("/")
+    assert "Also via Tor" not in response.text
+    assert ".onion" not in response.text
 
 
 def test_docs_serves_swagger_ui_with_no_third_party_assets(client: TestClient):
