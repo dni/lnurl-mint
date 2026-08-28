@@ -6,12 +6,16 @@ from coincurve import PublicKey
 from .node import LightningBackendConfig, fetch_node_info, sign_message
 
 # LUD-25 Offline verification: signed via this mint's own funding-source
-# node identity key (lnd's/cln's signmessage RPC - see node.sign_message),
-# which always wraps the message with this prefix and double-sha256s it
-# before signing - not a raw digest over a bespoke scheme, so any tool that
-# already verifies a Lightning node's signed messages can verify a note too.
-# Same reuse LUD-13 (../luds/13.md) relies on for LNURL-auth seed
-# generation, rather than a separate keypair.
+# identity key. For lnd/cln that's the node's signmessage RPC, which always
+# wraps the message with this prefix and double-sha256s it before signing -
+# not a raw digest over a bespoke scheme, so any tool that already verifies
+# a Lightning node's signed messages can verify a note too. Same reuse
+# LUD-13 (../luds/13.md) relies on for LNURL-auth seed generation, rather
+# than a separate keypair. The spark backend cannot participate: its SDK
+# signs a single-sha256 digest with no raw-digest API, and LUD-25 fixes the
+# digest this construction produces - so for spark, mint_pubkey/sign_note
+# omit the fields entirely rather than emit signatures no spec-conformant
+# wallet could verify (see spark._sign_message_spark).
 _LIGHTNING_SIGNED_MESSAGE_PREFIX = b"Lightning Signed Message:"
 _DOMAIN_TAG = "LNURLcash"
 
@@ -34,8 +38,15 @@ async def mint_pubkey(config: LightningBackendConfig) -> str | None:
     against the same identity, exactly as the spec recommends. None if no
     funding source is configured or it's unreachable - offline verification
     is then simply unavailable, the same way funding-source-backed features
-    are when that's unconfigured."""
-    if not config.backend:
+    are when that's unconfigured.
+
+    Also None for the spark backend, deliberately: it cannot produce a
+    note signature any spec-conformant wallet would verify (see
+    spark._sign_message_spark), so advertising the key it *would* sign
+    with would just point wallets at a verification that always fails -
+    omitting both mintPubkey and the signatures together is the honest
+    "offline verification unavailable" state the spec allows."""
+    if not config.backend or config.backend == "spark":
         return None
     try:
         info = await fetch_node_info(config)

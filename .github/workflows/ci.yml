@@ -56,6 +56,32 @@ jobs:
       - name: pytest
         run: uv run pytest
 
+  # the spark backend's SDK-facing tests (tests/test_spark_backend.py)
+  # need the optional breez-sdk-spark native wheel (~20MB) - a separate
+  # job rather than the default sync so every other job stays light and
+  # the core suite keeps running even if the wheel is unavailable for a
+  # platform; the tests importorskip themselves out of the plain `test`
+  # job above without it
+  spark:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+          python-version: "3.10"
+
+      - name: Install python dependencies
+        run: uv sync --locked --dev --extra spark
+
+      - name: Fetch Swagger UI assets
+        run: uv run python scripts/fetch_swagger_ui.py
+
+      - name: pytest (spark)
+        run: uv run pytest tests/test_spark.py tests/test_spark_backend.py -v
+
   nix:
     runs-on: ubuntu-24.04
     steps:

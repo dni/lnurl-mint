@@ -22,6 +22,13 @@ dependencies = [
   "coincurve>=20.0.0",
 ]
 
+# the spark funding-source backend (FUNDINGSOURCE_BACKEND=spark, see
+# lnurl_mint/spark.py) - kept optional so the default install stays light
+# (the wheel is ~20MB of prebuilt native bindings); install with
+# `uv sync --extra spark` / `uv pip install '.[spark]'`
+[project.optional-dependencies]
+spark = ["breez-sdk-spark>=0.23.0,<0.24"]
+
 [dependency-groups]
 dev = [
   "pytest>=7.4.0,<8.0.0",

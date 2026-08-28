@@ -27,8 +27,9 @@ class Settings(BaseSettings):
     # verification via the node's own signmessage RPC (see signing.py) -
     # there's no separate setting for that, it's simply unavailable without
     # a funding source. Only the credential for the chosen backend is
-    # required (macaroon for lnd, rune for cln); the other is ignored.
-    fundingsource_backend: Literal["lnd", "cln"] | None = None
+    # required (macaroon for lnd, rune for cln, mnemonic for spark); the
+    # others are ignored.
+    fundingsource_backend: Literal["lnd", "cln", "spark"] | None = None
     fundingsource_url: str | None = None
     fundingsource_macaroon: SecretStr | None = None
     fundingsource_rune: SecretStr | None = None
@@ -36,6 +37,25 @@ class Settings(BaseSettings):
     # both lnd's and cln's REST APIs are commonly self-signed. Leave unset if
     # it's fronted by a reverse proxy with a real certificate.
     fundingsource_cert_path: str | None = None
+
+    # spark (FUNDINGSOURCE_BACKEND=spark, see lnurl_mint/spark.py): the
+    # BIP39 mnemonic of the mint's breez-sdk-spark wallet - the wallet's
+    # entire key material, treat like a hot wallet seed. The Breez API
+    # key the SDK's services (notably the mainnet SSP) require, from
+    # https://breez.technology/request-api-key. The SDK keeps its own
+    # sqlite store of payments and claims; it defaults to a
+    # spark-wallet/ directory next to DATABASE_PATH and must never be
+    # shared by two processes, same rule as DATABASE_PATH itself.
+    # sync_interval bounds how long after a payment lands that settlement
+    # detection can first notice (see spark.py). The optional
+    # breez-sdk-spark dependency is needed to use any of this
+    # (`uv sync --extra spark`).
+    fundingsource_spark_mnemonic: SecretStr | None = None
+    fundingsource_spark_api_key: SecretStr | None = None
+    fundingsource_spark_network: Literal["mainnet", "regtest"] = "mainnet"
+    fundingsource_spark_storage_dir: str | None = None
+    fundingsource_spark_sync_interval_secs: int = Field(default=15, ge=1)
+    fundingsource_spark_account_number: int | None = None
     # how often (seconds) to re-probe the funding source in the background
     # after boot, once a backend is configured - the one-shot check at
     # startup (see server.py's lifespan) only catches a connection problem
@@ -43,7 +63,10 @@ class Settings(BaseSettings):
     # or a flaky one boot happened to catch mid-recovery. Only ever logs on
     # a state transition (became unreachable / recovered), never every tick.
     # ge=1: 0 would busy-loop getinfo against the node (server.py's monitor
-    # sleeps exactly this between probes).
+    # sleeps exactly this between probes). For the spark backend this
+    # interval is also the connectivity-probe cadence (see spark.py's
+    # _remote_probe): every healthy tick leaves one expiring 1-sat invoice
+    # at the SSP, so raise it if that cadence ever matters to you.
     funding_source_health_check_interval_seconds: int = Field(default=60, ge=1)
 
     # bounds on the value of a single minted note (LUD-06 min/maxSendable) -
@@ -181,6 +204,13 @@ class Settings(BaseSettings):
             macaroon=self.fundingsource_macaroon,
             rune=self.fundingsource_rune,
             cert_path=self.fundingsource_cert_path,
+            spark_mnemonic=self.fundingsource_spark_mnemonic,
+            spark_api_key=self.fundingsource_spark_api_key,
+            spark_network=self.fundingsource_spark_network,
+            spark_storage_dir=self.fundingsource_spark_storage_dir
+            or os.path.join(os.path.dirname(os.path.abspath(self.database_path)), "spark-wallet"),
+            spark_sync_interval_secs=self.fundingsource_spark_sync_interval_secs,
+            spark_account_number=self.fundingsource_spark_account_number,
         )
 
 

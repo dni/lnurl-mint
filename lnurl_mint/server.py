@@ -140,6 +140,17 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         with contextlib.suppress(asyncio.CancelledError):
             await monitor_task
 
+    # the spark backend's SDK singleton owns background tasks and its own
+    # store (see spark.py) - disconnected here so they stop with the
+    # process instead of being torn down under a request by the
+    # interpreter. The boot-time fetch_node_info above already built it,
+    # so this is a no-op exactly when spark was never configured/unreachable
+    # the whole run.
+    if funding_source.backend == "spark":
+        from . import spark as spark_backend
+
+        await spark_backend.shutdown()
+
 
 app = FastAPI(
     title="lnurl-mint",

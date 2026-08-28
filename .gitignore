@@ -11,3 +11,7 @@ result*
 # fetched at build time by scripts/fetch_swagger_ui.py, never committed
 lnurl_mint/static/swagger-ui-bundle.js
 lnurl_mint/static/swagger-ui.css
+# a Breez API key handed to this checkout for mainnet testing - a
+# credential, never committed (scripts/spark_mainnet_check.py reads it by
+# default; move or rename it freely and pass --api-key-file instead)
+breez-api.key

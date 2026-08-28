@@ -199,6 +199,38 @@ wheels = [
 ]
 
 [[package]]
+name = "breez-sdk-spark"
+version = "0.23.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/33/c579e45af2437e9fe9308a92f7d1da9b99ece9af2d4243fbea11fb8e4d98/breez_sdk_spark-0.23.0-cp310-cp310-macosx_11_0_universal2.whl", hash = "sha256:020808dbd6c4f8116a8574783682d3497d3a5dee49696082119dba2d2142c545", size = 20498943, upload-time = "2026-08-24T13:06:38.065Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/49/a085d73ae05f1120f0d2fafb567174481ce9669154fe8848b18b24ed7351/breez_sdk_spark-0.23.0-cp310-cp310-manylinux_2_31_aarch64.whl", hash = "sha256:139e4d442c53d0447c1a55a7dd403e1096727ab453b92858c01fc848e1212314", size = 17918639, upload-time = "2026-08-24T13:06:40.646Z" },
+    { url = "https://files.pythonhosted.org/packages/20/58/aa5bbb168c403e937c0aaa76292db4368500ccc28540ed8435c2be091a58/breez_sdk_spark-0.23.0-cp310-cp310-manylinux_2_31_x86_64.whl", hash = "sha256:ce3a372d72041b85eb3b82d709cae00b50d5fd281dca0f1d6fc704f5b1d9b374", size = 17875633, upload-time = "2026-08-24T13:06:44.24Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/4e/e88aae291e6224ade480ef2b95629e2296232fedd43a5b8211a0e63144ab/breez_sdk_spark-0.23.0-cp310-cp310-win32.whl", hash = "sha256:d76aeffab4e2063144239ffa91fcb632771aa405cca82fdb8bb147954355c6c6", size = 8325719, upload-time = "2026-08-24T13:06:46.784Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/34/6ad63b6fad639f52c6fc25e2befbe47dfebb2d694816d518ca7507da6ab4/breez_sdk_spark-0.23.0-cp310-cp310-win_amd64.whl", hash = "sha256:643df9234bcda05456a6413effdd55820c4237487699049fd3ca07a74bed74f8", size = 8659951, upload-time = "2026-08-24T13:06:48.682Z" },
+    { url = "https://files.pythonhosted.org/packages/63/69/30d627e4e0c3e297ad3034e4cc737654c8eb54854a9b5628138fbb041b86/breez_sdk_spark-0.23.0-cp311-cp311-macosx_11_0_universal2.whl", hash = "sha256:f45d8248bd657263fe0d5ad9902c12b758109ba0801719aba0f064bd6301b793", size = 20498943, upload-time = "2026-08-24T13:06:51.117Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/a5/913c7ba0e41ac6ec8902f6e20d538389d06946d58c204fbcbd25874bb939/breez_sdk_spark-0.23.0-cp311-cp311-manylinux_2_31_aarch64.whl", hash = "sha256:3ee128260cb8fbe83528ee720c275dcd393a0cb9e667ed0bb39358ad0beeda24", size = 17918637, upload-time = "2026-08-24T13:06:55.532Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/af/b8acadd25f6c96b521732c57ab1d344b1129d50bf37eaf29926d84f3eb30/breez_sdk_spark-0.23.0-cp311-cp311-manylinux_2_31_x86_64.whl", hash = "sha256:a22b63a5a92739ad5c121cbf398786d11f9ba2f5962fbc8dadfc8a2f9bfb9bd1", size = 17875633, upload-time = "2026-08-24T13:06:58.663Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/92/d0a06528f1c3b0d3b45caf2e0d2e28b35c7362629cb0c926fb3615be557e/breez_sdk_spark-0.23.0-cp311-cp311-win32.whl", hash = "sha256:40bdbab7d8cc1ed0442d862895674f2802a583c0b234ee9155f044f74fbc1e5d", size = 8325718, upload-time = "2026-08-24T13:07:01.14Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/97/65184a30d463c484df1d46af52e42da5a28c3b8831a16b633bce685cf74c/breez_sdk_spark-0.23.0-cp311-cp311-win_amd64.whl", hash = "sha256:501da091a188e34a8f137f89ce10f676a4b1112030fea69f4d8b444d7f96d482", size = 8659952, upload-time = "2026-08-24T13:07:02.948Z" },
+    { url = "https://files.pythonhosted.org/packages/32/ef/97dbb9531b25d866bf080b7a9bbc654a3633557cd10e653185995f2b20a1/breez_sdk_spark-0.23.0-cp312-cp312-macosx_11_0_universal2.whl", hash = "sha256:80ff4973bf16a0c075541b9cb24ab61a7c81dbff8fc64b68f0c393b3dc0574f3", size = 20498975, upload-time = "2026-08-24T13:07:06.103Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/7c/14a18b54642b23411702f06b33674af61c771338a5a6cde4710a455c1554/breez_sdk_spark-0.23.0-cp312-cp312-manylinux_2_31_aarch64.whl", hash = "sha256:32f8664425d7bbe73256db81a9160311eca94de0321d6cf73b8b932728edeb90", size = 17918641, upload-time = "2026-08-24T13:07:08.903Z" },
+    { url = "https://files.pythonhosted.org/packages/74/58/538a9101573eb10cab5b54be2d4baa33bed7f118af8f2428febf958c4168/breez_sdk_spark-0.23.0-cp312-cp312-manylinux_2_31_x86_64.whl", hash = "sha256:7b8eb17ea7cdfa0f9e2aaac2625cc06836ec0f93119a22dad80028ea4396a98b", size = 17875633, upload-time = "2026-08-24T13:07:11.885Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/c7/02423d75841ac8c4a27af8a1b6957e866521cb2a18fd419d141515f1e163/breez_sdk_spark-0.23.0-cp312-cp312-win32.whl", hash = "sha256:786f711fe45467cc0373b489faab8a6f3317fcf8d2dcc8ad88eac97efb1049e7", size = 8325719, upload-time = "2026-08-24T13:07:14.61Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/03/2fc786e976954f2f14ba552492eefff5a7c8522d366f7e457da15b842321/breez_sdk_spark-0.23.0-cp312-cp312-win_amd64.whl", hash = "sha256:28f7a38f07b786560b18f2ed760be927b71aaae7e021967cbac6fb1a2a448d5b", size = 8659952, upload-time = "2026-08-24T13:07:16.449Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/fd/92fa5900246f2eafd5c3208bc36d0e03d8275ce42a38d01cf794c7ce39a6/breez_sdk_spark-0.23.0-cp313-cp313-macosx_11_0_universal2.whl", hash = "sha256:b681b336bdbcbdd8a9900edae398e512e1dc62518a8b8b0d7395a80b95a91295", size = 20498976, upload-time = "2026-08-24T13:07:19.258Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/1d/f18a2f41b083ee98cb07ba69aab4e1f2cdad77cd6271e7783afc79dccc46/breez_sdk_spark-0.23.0-cp313-cp313-manylinux_2_31_aarch64.whl", hash = "sha256:5956286d50df379cf02aca1da7f1c3d8c5438ef1b33979af1a1398d7784656e8", size = 17918639, upload-time = "2026-08-24T13:07:22.036Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/e9/33f6f0c3cbbd08c2d05506617729e3350ef767511332f00a68e54a636493/breez_sdk_spark-0.23.0-cp313-cp313-manylinux_2_31_x86_64.whl", hash = "sha256:c51aa8932ff021521c457fa22abd8d893ece2114505e79495ee9c1c2980d166f", size = 17875633, upload-time = "2026-08-24T13:07:25.308Z" },
+    { url = "https://files.pythonhosted.org/packages/18/9a/859bfe25c6d48d2c663055d804508951c0de3f6939ada8b9b9ee084768ef/breez_sdk_spark-0.23.0-cp313-cp313-win32.whl", hash = "sha256:89415096904b33d1db519d1600cee57f6985fc4e242664b0845ca72c8e7fc0b1", size = 8325719, upload-time = "2026-08-24T13:07:28.003Z" },
+    { url = "https://files.pythonhosted.org/packages/50/44/d86df7471a2531caa44d7cc596df11577a7eaa076f1534f3417d7c5ab704/breez_sdk_spark-0.23.0-cp313-cp313-win_amd64.whl", hash = "sha256:e66336ce436efca05c08663a7df7b5d0f6e47ea06454b21cb9a13cd904807012", size = 8659952, upload-time = "2026-08-24T13:07:29.989Z" },
+    { url = "https://files.pythonhosted.org/packages/79/58/ea0a0390e5e1c3f48f333db8dfec324856199bbd75ee3a0f36041e036a24/breez_sdk_spark-0.23.0-cp314-cp314-macosx_11_0_universal2.whl", hash = "sha256:47e5d450fee8c60fdb24c1c1738c883bd944c8433e1ca415b8948e0cb2eebad1", size = 20498976, upload-time = "2026-08-24T13:07:32.927Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/d1/3c52147961f1d9b7f8bf6abb3188f37e95842a6b5c0130c0d2206e353401/breez_sdk_spark-0.23.0-cp314-cp314-manylinux_2_31_aarch64.whl", hash = "sha256:a99cd4ca3337fd660ebbf460b1f022e58b7ddadd90b295a0aab62c92c9be06c0", size = 17918638, upload-time = "2026-08-24T13:07:35.712Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/c9/fccbad9c729a4e8c15b88495f26ab96b2650c444e46daaf369459b5f0aea/breez_sdk_spark-0.23.0-cp314-cp314-manylinux_2_31_x86_64.whl", hash = "sha256:939fb72ae0270e35327e8fd99a89361c836aef6113cf1cdd206d5d2a21ca90f8", size = 17875633, upload-time = "2026-08-24T13:07:38.637Z" },
+    { url = "https://files.pythonhosted.org/packages/99/71/ccda209a2b7adf4dbd2594c851ff808050c790ed1d374c0c08e44d9e7f51/breez_sdk_spark-0.23.0-cp314-cp314-win32.whl", hash = "sha256:b330dfabbd6d72b2966723658e820b81e510fae06657bd4a787e29986f6e7e8a", size = 8481670, upload-time = "2026-08-24T13:07:41.475Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/cc/c18a463bcb33297969f19cd7090aef3fd7d5f3aafe04fce21350ca1dc75c/breez_sdk_spark-0.23.0-cp314-cp314-win_amd64.whl", hash = "sha256:ab02f6d1b1ff83c3eb480e4692c88d40150a07d7be995112a7418f8e5caeb902", size = 8845054, upload-time = "2026-08-24T13:07:43.68Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -281,7 +313,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -508,6 +540,11 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
+[package.optional-dependencies]
+spark = [
+    { name = "breez-sdk-spark" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "black" },
@@ -520,6 +557,7 @@ dev = [
 requires-dist = [
     { name = "bech32", specifier = ">=1.2.0" },
     { name = "bolt11" },
+    { name = "breez-sdk-spark", marker = "extra == 'spark'", specifier = ">=0.23.0,<0.24" },
     { name = "coincurve", specifier = ">=20.0.0" },
     { name = "fastapi", specifier = ">=0.115.11,<0.116.0" },
     { name = "httpx" },
@@ -527,6 +565,7 @@ requires-dist = [
     { name = "qrcode", specifier = ">=8.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
+provides-extras = ["spark"]
 
 [package.metadata.requires-dev]
 dev = [

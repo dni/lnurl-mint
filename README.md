@@ -122,7 +122,12 @@ contacting the mint (see `signing.py`). Notes are signed via the funding source'
 with the standard "Lightning Signed Message:" prefix and double-sha256 it
 before signing - the same convention other Lightning tooling already uses to
 prove node ownership, rather than a bespoke raw-digest scheme neither backend
-can actually produce. There's no separate setting for this: without a funding
+can actually produce. The spark backend cannot participate at all: its SDK
+signs a single-sha256 digest with no raw-digest API, so it cannot produce
+the digest LUD-25 fixes - rather than advertise signatures (or a
+`mintPubkey`) no spec-conformant wallet would ever verify, spark-funded
+mints simply omit both optional fields (see `spark._sign_message_spark`).
+There's no separate setting for this: without a funding
 source, both fields are simply omitted, same as any other unconfigured
 optional field, and signing failures (e.g. a briefly unreachable node) are
 swallowed rather than failing the rotate/split/merge itself.
@@ -249,9 +254,10 @@ uv sync
 FORWARDED_ALLOW_IPS=* uv run uvicorn lnurl_mint.server:app --reload
 ```
 
-Configure the funding source via `.env` (see `.env.example`), lnd or cln REST.
-Without one, minting and melting are unavailable (rotate/split/merge of existing
-notes still work).
+Configure the funding source via `.env` (see `.env.example`): lnd or cln REST,
+or a [spark](https://github.com/breez/spark-sdk) wallet (see "Spark
+funding source" below). Without one, minting and melting are unavailable
+(rotate/split/merge of existing notes still work).
 
 Run exactly **one process** per `DATABASE_PATH`: no `--workers` greater than 1,
 and no second container sharing the same database file. Note reservation,
@@ -302,6 +308,94 @@ optional and never blocks a rotate/split/merge on failure (see
 silently missing its signature rather than an obvious error - check the
 logs for `sign_note: could not sign via lnd funding source: ...` if that
 happens.
+
+### Spark funding source
+
+`FUNDINGSOURCE_BACKEND=spark` funds the mint from a
+[spark](https://github.com/breez/spark-sdk) wallet instead of a Lightning
+node - no channels, no inbound liquidity, no node ops: the mint holds a
+spark balance and pays/receives over Lightning through its SSP. The whole
+node contract is implemented in `lnurl_mint/spark.py`, on top of the
+Breez Spark SDK's Python bindings:
+
+```sh
+uv sync --extra spark   # breez-sdk-spark is an optional ~20MB native dep
+```
+
+```sh
+FUNDINGSOURCE_BACKEND=spark
+FUNDINGSOURCE_SPARK_MNEMONIC=<12/24 BIP39 words>
+FUNDINGSOURCE_SPARK_API_KEY=<breez api key>
+# optional: FUNDINGSOURCE_SPARK_NETWORK (mainnet|regtest),
+# FUNDINGSOURCE_SPARK_STORAGE_DIR (default: spark-wallet/ next to
+# DATABASE_PATH), FUNDINGSOURCE_SPARK_SYNC_INTERVAL_SECS (default 15)
+```
+
+The mnemonic is the wallet's entire key material - a hot wallet seed;
+the API key is free from
+[Breez](https://breez.technology/request-api-key/). The SDK keeps its own
+sqlite store under `FUNDINGSOURCE_SPARK_STORAGE_DIR` and runs background
+sync/claim tasks inside the mint's process (built once at startup,
+disconnected at shutdown) - same single-process rule as `DATABASE_PATH`:
+never share the storage dir between two processes.
+
+Behavioral differences worth knowing (details in `spark.py`'s module
+docstring):
+
+- **The mint never sees a mint-invoice's preimage.** The SSP generates
+  and holds it; the note's `k1` (in the no-comment fallback, the
+  preimage) reaches the payer through the payment itself, and LUD-21
+  verify fetches it live from the SDK afterwards - the
+  store-hashes-not-secrets policy holds either way, just more literally.
+- **LUD-25 offline verification is unavailable** - see above.
+- **Melt payments always take the Lightning route** (never a spark-routed
+  shortcut) and are idempotent per invoice payment hash, and a melt whose
+  SSP quote exceeds the fee budget is rejected before anything is paid.
+  A melt payment the backend has no record of is **never** declared
+  "not paid" from absence - the SDK persists its payment row only after
+  the SSP accepts the payment, and its sync swallows reconciliation
+  failures, so absence is indeterminate (the note stays pending) unless
+  the SDK itself reports the payment failed, or this process provably
+  never sent it: a prepare/fee-quote rejection, a fractional-sat melt
+  (see below), or an insufficient-funds failure while selecting leaves -
+  the common underfunded-wallet case, whose note restores immediately.
+  That trade means: don't restart with unexplained pending melts; the
+  only melts needing manual resolution are pre-restart rejections and
+  genuinely ambiguous send errors - the safe direction of every
+  ambiguity is "keep the note".
+- **Settlement detection is bounded by
+  `FUNDINGSOURCE_SPARK_SYNC_INTERVAL_SECS`** (default 15s): that's how
+  long after a payment lands that mint/verify can first notice, since
+  the SDK's own background sync is what refreshes its payment records.
+  The health check probes both the coordinator operators and the SSP
+  (breez-sdk-spark 0.23 silently swallows sync failures, and either
+  service can fail while the other is up), so an unreachable Spark
+  network or a revoked Breez API key actually surfaces in the health
+  monitor - at the cost of one expiring 1-sat probe invoice at the SSP
+  per health tick (see `FUNDINGSOURCE_HEALTH_CHECK_INTERVAL_SECONDS`).
+- **Amounts are sat-aligned on both sides**: the SDK's bolt11 surface is
+  sat-denominated, so a fractional-sat `/p/cb` amount is rejected with a
+  logged error rather than rounded, and a fractional-sat melt invoice is
+  rejected the same way - the SDK would otherwise CEIL it into whole
+  sats of spark leaves, debiting more than the note's value (and tiny
+  fractional notes from splits would let a holder over-drain the wallet
+  by repeated melting).
+- **The frontend's Channels/Peers/Capacity rows are zeros** for spark -
+  a spark wallet has none of those, and its balance is private (unlike a
+  Lightning node's public channel capacity), so it is deliberately not
+  published there.
+
+A live smoke check against mainnet (invoice creation, settlement
+lookups, LUD-25 signing, and a melt-path fee quote - moves no funds by
+default):
+
+```sh
+uv run python scripts/spark_mainnet_check.py --api-key-file breez-api.key
+```
+
+The nix package does not ship this backend (the prebuilt wheel isn't
+packaged in nixpkgs) - use uv or Docker (`uv sync --extra spark` in your
+own image build) for spark-funded mints.
 
 ## Docker
 

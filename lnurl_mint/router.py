@@ -261,6 +261,25 @@ def _note_id(k1: str) -> str:
     return sha256(bytes.fromhex(k1)).hexdigest()
 
 
+def _created_invoice_payment_hash(pr: str) -> str:
+    """The payment hash of an invoice this mint just created, read off
+    the invoice itself - only reached for backends that cannot know the
+    preimage at creation time (spark, whose SSP generates it; see
+    node.create_invoice). A BOLT11 invoice always commits to exactly one
+    payment hash, so a decode failure or a hashless invoice here is a
+    malformed backend response, logged rather than trusted."""
+    try:
+        decoded = bolt11.decode(pr)
+    except Exception as exc:
+        raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, log_internal_error("Error decoding created invoice", exc))
+    if not decoded.has_payment_hash:
+        raise HTTPException(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            log_internal_error("Created invoice carries no payment hash", ValueError(pr[:64])),
+        )
+    return decoded.payment_hash
+
+
 async def _mint_settled_by_comment(comment_hash: str) -> bool:
     """Whether the LUD-25 comment-protected mint whose secret hashes to
     `comment_hash` has settled - lazily materializes the resulting note
@@ -545,8 +564,15 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
             node_num_peers = info.num_peers
             # same derivation as signing.mint_pubkey - reused directly
             # rather than calling that function, which would fetch_node_info
-            # a second time for the exact same round trip
-            mint_pubkey_value = info.uri.split("@")[0] if info.uri else None
+            # a second time for the exact same round trip. spark excluded
+            # here for the same reason mint_pubkey excludes it (see its
+            # docstring): it cannot sign a note any spec-conformant wallet
+            # would verify, so advertising the key just points wallets at a
+            # verification that always fails - offline verification is
+            # honestly absent instead
+            mint_pubkey_value = (
+                None if funding_source.backend == "spark" else info.uri.split("@")[0] if info.uri else None
+            )
         except Exception as exc:
             logging.warning("mint address: could not reach %s funding source: %s", funding_source.backend, exc)
     return LnurlMintAddressResponse(
@@ -623,13 +649,18 @@ async def get_pay_callback(req: Request, amount: int, comment: str | None = None
         # exc's own text (backend error bodies, connection info, ...) is
         # never handed back on the wire - see log_internal_error
         raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, log_internal_error("Error creating invoice", exc))
-    # the preimage (the future bearer secret in the no-comment fallback)
-    # reaches the buyer through the Lightning payment itself and is
-    # discarded here, per the spec's storing-hashes-not-secrets guidance -
-    # only the payment hash and the invoice itself (for LUD-21 verify) are
-    # stored. The invoice itself is for the full `amount` (what the payer
-    # actually pays); the note it produces is credited net of the mint fee.
-    payment_hash = sha256(preimage).hexdigest()
+    # lnd/cln generate the preimage themselves and return it, so the hash
+    # is sha256(preimage); the spark backend cannot - its SSP generates
+    # and holds the preimage (see spark.py's module docstring) - and
+    # returns None instead, so there the hash is read straight off the
+    # invoice itself. The preimage (the future bearer secret in the
+    # no-comment fallback) reaches the buyer through the Lightning
+    # payment itself and is discarded here, per the spec's
+    # storing-hashes-not-secrets guidance - only the payment hash and the
+    # invoice itself (for LUD-21 verify) are stored. The invoice itself
+    # is for the full `amount` (what the payer actually pays); the note
+    # it produces is credited net of the mint fee.
+    payment_hash = sha256(preimage).hexdigest() if preimage is not None else _created_invoice_payment_hash(pr)
     try:
         notes.create_mint(payment_hash, pr, net_amount_msat, comment_hash)
     except ValueError as exc:
