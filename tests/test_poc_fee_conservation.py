@@ -50,10 +50,10 @@ class Ledger:
     # -- operations (each asserts its own expected arithmetic) --
 
     def mint(self, gross_msat: int) -> str:
-        resp = self.client.get(f"/p/cb?amount={gross_msat}")
+        k1, comment = fresh_secret()
+        resp = self.client.get(f"/p/cb?amount={gross_msat}&comment={comment}")
         assert resp.json().get("pr"), resp.text
-        k1 = self.node.last_preimage.hex()
-        self.node.settled.add(_note_id(k1))
+        self.node.settled.add(sha256(self.node.last_preimage).hexdigest())
         r = self.client.get(f"/w?k1={k1}")
         net = r.json()["maxWithdrawable"]
         # the minted value must equal gross minus the exact fee formula

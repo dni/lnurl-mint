@@ -7,16 +7,15 @@ fallback note's entire spend secret) to ANYONE who knew the payment_hash
 (embedded in the invoice itself), letting the first rotater win the note
 regardless of who paid for it.
 
-FIXED by LUD-25 comment protection (router.get_pay_callback /
-NoteStore.mint_uses_comment): SERVICE now refuses verify outright for any
-mint that skipped `comment` - there the preimage is the note's whole
-secret, so the endpoint that used to hand it to any invoice holder is
-closed for that mint instead. A mint that DID use `comment` still gets
-verify served, but its disclosed preimage is no longer the note's secret
-(the WALLET-held `secret` behind `comment` is), so the same theft chain
-fails there too, for a different reason. test_theft_chain_closed_by_verify_refusal
-and test_theft_chain_closed_because_comment_makes_the_preimage_harmless
-below pin both halves of the fix.
+FIXED, now in two layers: LUD-25 comment protection (router.get_pay_callback)
+is mandatory, so a no-comment mint - the case where the preimage IS the
+note's whole spend secret - is rejected at /p/cb outright, before an invoice
+or a verify URL ever exists (see
+test_theft_chain_closed_at_the_door_comment_is_now_mandatory below). And even
+setting that aside, a mint that DOES use `comment` gets verify served, but
+its disclosed preimage is no longer the note's secret (the WALLET-held
+`secret` behind `comment` is), so the same theft chain fails there too, for
+a different reason (test_theft_chain_closed_because_comment_makes_the_preimage_harmless).
 
 What the earlier review changed, still true and unaffected by the above:
 VERIFY_ENABLED=false is a real off switch - the endpoint 404s entirely (not
@@ -33,37 +32,22 @@ from lnurl_mint.db import notes
 from tests.conftest import FakeNode, fake_invoice, fresh_secret
 
 
-def test_theft_chain_closed_by_verify_refusal(client: TestClient, node: FakeNode, monkeypatch):
-    """The original theft chain, now closed: a mint that skips `comment`
-    (LUD-25 comment protection) still credits k1=preimage exactly as
-    before, but SERVICE now refuses to serve verify for it at all, even
-    with VERIFY_ENABLED on - so the attacker's very first step (scraping
-    the preimage from /verify) never gets off the ground."""
+def test_theft_chain_closed_at_the_door_comment_is_now_mandatory(client: TestClient, node: FakeNode, monkeypatch):
+    """The original theft chain (attacker scrapes a no-comment mint's
+    preimage from /verify, since there it IS the note's whole spend secret)
+    is now closed one step earlier than the verify-refusal fix below: a
+    mint that skips `comment` (LUD-25 comment protection) is rejected
+    outright at /p/cb, so no preimage-keyed fallback note - and no invoice
+    to scrape a preimage from in the first place - ever comes into
+    existence."""
     monkeypatch.setattr(settings, "verify_enabled", True)
 
-    # victim requests a mint invoice for 50_000 msat and pays it, WITHOUT
-    # comment protection (a legacy or LNURLcash-aware-but-opted-out wallet)
-    resp = client.get("/p/cb?amount=50000")
-    assert "verify" not in resp.json()
-    victim_pr = resp.json()["pr"]
-    victim_ph = bolt11.decode(victim_pr).payment_hash  # what the attacker knows
-    node.settled.add(victim_ph)  # the Lightning payment itself
-
-    # ATTACKER (knowing only payment_hash): verify is refused outright, no
-    # comment was ever used for this mint
-    r = client.get(f"/verify/{victim_ph}")
-    assert r.json() == {"status": "ERROR", "reason": "Not found"}
-
-    # the victim's own preimage (learned the ordinary way, from paying the
-    # invoice) still redeems the note normally - only the remote-disclosure
-    # endpoint is closed, not the fallback note itself. Verify's refusal
-    # above never touched the lazy-settle path, so the note only actually
-    # materializes here, on the rotate itself.
-    preimage = node.last_preimage.hex()
-    _, victim_h = fresh_secret()
-    r = client.get(f"/w/cb?k1={preimage}&h={victim_h}")
-    assert r.json()["status"] == "OK", r.text
-    assert notes.note_amount(victim_h) == 50_000
+    # victim tries to mint WITHOUT comment protection (a legacy or
+    # LNURLcash-aware-but-opted-out wallet) - refused before an invoice is
+    # even created
+    resp = client.get("/p/cb?amount=50000").json()
+    assert resp["status"] == "ERROR"
+    assert "comment" in resp["reason"].lower()
 
 
 def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
@@ -104,21 +88,15 @@ def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
     assert notes.note_amount(victim_h) == 50_000
 
 
-def test_verify_refuses_the_no_comment_fallback_before_and_after_settlement(
-    client: TestClient, node: FakeNode, monkeypatch
-):
-    """The old exposure window in one picture, now closed at both points in
-    time: from the moment /p/cb answers, /verify/{ph} 404s for ANY holder of
-    the payment_hash of a no-comment mint - both while unpaid and once
-    settled, never just its advertisement."""
+def test_no_comment_mint_never_gets_far_enough_to_have_a_verify_url(client: TestClient, node: FakeNode, monkeypatch):
+    """The old exposure window in one picture, now closed even earlier than
+    the verify-refusal fix: a no-comment mint request is rejected outright,
+    so there's no payment_hash, no invoice, and nothing for /verify/{ph} to
+    ever answer about - at any point in time."""
     monkeypatch.setattr(settings, "verify_enabled", True)
-    resp = client.get("/p/cb?amount=50000")
-    ph = bolt11.decode(resp.json()["pr"]).payment_hash
-    r = client.get(f"/verify/{ph}")
-    assert r.json() == {"status": "ERROR", "reason": "Not found"}
-    node.settled.add(ph)
-    r = client.get(f"/verify/{ph}")
-    assert r.json() == {"status": "ERROR", "reason": "Not found"}
+    resp = client.get("/p/cb?amount=50000").json()
+    assert resp["status"] == "ERROR"
+    assert "pr" not in resp
 
 
 def test_melt_direction_verify_is_harmless(client: TestClient, node: FakeNode, mint_note, monkeypatch):
@@ -172,7 +150,8 @@ def test_verify_disabled_closes_the_hole(client: TestClient, node: FakeNode):
     payment_hash learns nothing, and the victim's slow manual rotate
     succeeds untouched."""
     assert settings.verify_enabled is False
-    resp = client.get("/p/cb?amount=50000")
+    victim_secret, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount=50000&comment={comment}")
     victim_ph = bolt11.decode(resp.json()["pr"]).payment_hash
     node.settled.add(victim_ph)
 
@@ -180,8 +159,7 @@ def test_verify_disabled_closes_the_hole(client: TestClient, node: FakeNode):
     assert client.get(f"/verify/{victim_ph}").json() == {"status": "ERROR", "reason": "Not found"}
 
     # ...and the victim rotates at human speed, unhurried and unrobbed
-    preimage = node.last_preimage.hex()
     _, victim_h = fresh_secret()
-    r = client.get(f"/w/cb?k1={preimage}&h={victim_h}")
+    r = client.get(f"/w/cb?k1={victim_secret}&h={victim_h}")
     assert r.json()["status"] == "OK", r.text
     assert notes.note_amount(victim_h) == 50_000

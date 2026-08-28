@@ -32,11 +32,16 @@ PLANT_AMOUNT = 10_000
 
 
 def _pending_victim_mint(client: TestClient, node) -> tuple[str, str]:
-    """A victim mint invoice, requested but not yet paid: (payment_hash, preimage_hex)."""
-    resp = client.get(f"/p/cb?amount={VICTIM_AMOUNT}")
+    """A victim mint invoice, requested but not yet paid: (payment_hash,
+    secret). The squat targets `payment_hash` - visible in the victim's
+    BOLT11 pr before settlement, unrelated to comment protection (which
+    only changes what the resulting note's k1 will be: the WALLET's
+    secret, not the preimage)."""
+    secret, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount={VICTIM_AMOUNT}&comment={comment}")
     assert resp.json().get("pr"), resp.text
     preimage = node.last_preimage
-    return sha256(preimage).hexdigest(), preimage.hex()
+    return sha256(preimage).hexdigest(), secret
 
 
 def _assert_squat_rejected(resp, attacker_k1: str) -> None:
@@ -57,7 +62,7 @@ def _assert_victim_mint_materializes(client: TestClient, node, victim_ph: str, v
     assert body.get("tag") == "withdrawRequest", body
     assert body["maxWithdrawable"] == VICTIM_AMOUNT, body
     assert notes.mint_settled(victim_ph) is True
-    assert notes.note_amount(victim_ph) == VICTIM_AMOUNT
+    assert notes.note_amount(sha256(bytes.fromhex(victim_k1)).hexdigest()) == VICTIM_AMOUNT
 
 
 def test_rotate_squat_is_rejected_and_victim_mint_survives(client: TestClient, node, mint_note):
@@ -105,14 +110,14 @@ def test_split_and_merge_squats_are_rejected_identically(client: TestClient, nod
 
 def test_squat_on_an_already_settled_mints_id_is_also_rejected(client: TestClient, node, mint_note):
     """The guard consults `mints` rows regardless of minted state: a settled
-    mint's payment_hash remains a note id (the note it produced), so a
-    WALLET-chosen id colliding with it must reject the same way - not just
-    for consistency, but because that id IS an outstanding note's id.
-    (Bonus: pre-fix this path died on the notes-table PK constraint with an
-    ugly internal-error 500; the guard converts it into the same clean,
-    generic rejection.)"""
+    mint's payment_hash row stays in `mints` forever (even though, with
+    comment protection mandatory, the note it actually produced is keyed by
+    comment_hash instead - see settle_mint), so a WALLET-chosen id colliding
+    with that payment_hash must still reject, generically, rather than dying
+    on the notes-table PK constraint with an ugly internal-error 500."""
     victim_k1 = mint_note(VICTIM_AMOUNT)
-    victim_ph = sha256(bytes.fromhex(victim_k1)).hexdigest()
+    victim_note_id = sha256(bytes.fromhex(victim_k1)).hexdigest()  # = comment_hash, the note's real id
+    victim_ph = sha256(node.last_preimage).hexdigest()  # the underlying invoice's payment_hash
     # materialize the note (mints settle lazily, on first resolution)
     assert client.get(f"/w?k1={victim_k1}").json()["maxWithdrawable"] == VICTIM_AMOUNT
     assert notes.mint_settled(victim_ph) is True
@@ -121,7 +126,7 @@ def test_squat_on_an_already_settled_mints_id_is_also_rejected(client: TestClien
     resp = client.get(f"/w/cb?k1={attacker_k1}&h={victim_ph}")
     _assert_squat_rejected(resp, attacker_k1)
     # the victim's real note is untouched
-    assert notes.note_amount(victim_ph) == VICTIM_AMOUNT
+    assert notes.note_amount(victim_note_id) == VICTIM_AMOUNT
 
 
 def test_legitimate_ids_still_pass_the_guard(client: TestClient, node, mint_note):

@@ -28,18 +28,18 @@ def test_pay_request_advertises_withdraw_link(client: TestClient):
     assert data["minSendable"] <= data["maxSendable"]
 
 
-def test_paid_invoice_preimage_becomes_a_bearer_note(client: TestClient, node: FakeNode):
-    response = client.get("/p/cb?amount=5000")
+def test_paid_invoice_secret_becomes_a_bearer_note(client: TestClient, node: FakeNode):
+    secret, comment = fresh_secret()
+    response = client.get(f"/p/cb?amount=5000&comment={comment}")
     assert response.json()["pr"]
-    k1 = node.last_preimage.hex()
 
     # not settled yet - not a note
-    assert note_value(client, k1) is None
+    assert note_value(client, secret) is None
 
     node.settled.add(sha256(node.last_preimage).hexdigest())
-    assert note_value(client, k1) == 5000
+    assert note_value(client, secret) == 5000
     # the informational GET never consumes the note
-    assert note_value(client, k1) == 5000
+    assert note_value(client, secret) == 5000
 
 
 def test_pay_callback_advertises_the_lnaddress_as_not_disposable(client: TestClient, node: FakeNode):
@@ -47,7 +47,8 @@ def test_pay_callback_advertises_the_lnaddress_as_not_disposable(client: TestCli
     # repeatable way to mint fresh notes, not a one-shot link - a WALLET
     # that doesn't recognize `disposable` at all must otherwise assume
     # `true` and may discard it, so this has to be sent explicitly
-    response = client.get("/p/cb?amount=5000")
+    _, comment = fresh_secret()
+    response = client.get(f"/p/cb?amount=5000&comment={comment}")
     assert response.json()["disposable"] is False
 
 
@@ -86,34 +87,37 @@ def test_pay_response_advertises_fee_inclusive_min_sendable(client: TestClient, 
     min_sendable = client.get(f"/.well-known/lnurlp/{settings.username}").json()["minSendable"]
     assert min_sendable == 11000  # 10000 (min_mint_msat) + 1000 (fee)
 
-    response = client.get(f"/p/cb?amount={min_sendable}")
+    secret, comment = fresh_secret()
+    response = client.get(f"/p/cb?amount={min_sendable}&comment={comment}")
     assert response.json()["pr"]
     node.settled.add(sha256(node.last_preimage).hexdigest())
-    assert note_value(client, node.last_preimage.hex()) == 10000
+    assert note_value(client, secret) == 10000
 
 
 def test_mint_credits_note_net_of_configured_fee(client: TestClient, node: FakeNode, monkeypatch):
     monkeypatch.setattr(settings, "base_fee_msat", 1000)
     monkeypatch.setattr(settings, "fee_percent_ppm", 2000)  # 0.2%
 
-    client.get("/p/cb?amount=100000")
+    secret, comment = fresh_secret()
+    client.get(f"/p/cb?amount=100000&comment={comment}")
     node.settled.add(sha256(node.last_preimage).hexdigest())
 
     # 1000 flat + 0.2% of 100000 = 1000 + 200 = 1200, rounded up to the
     # nearest whole sat (2000) - see test_mint_fee_rounds_up_to_the_nearest_sat
-    assert note_value(client, node.last_preimage.hex()) == 100000 - 2000
+    assert note_value(client, secret) == 100000 - 2000
 
 
 def test_mint_fee_rounds_up_to_the_nearest_sat(client: TestClient, node: FakeNode, monkeypatch):
     monkeypatch.setattr(settings, "base_fee_msat", 0)
     monkeypatch.setattr(settings, "fee_percent_ppm", 1)  # 0.0001%
 
-    client.get("/p/cb?amount=100000000")
+    secret, comment = fresh_secret()
+    client.get(f"/p/cb?amount=100000000&comment={comment}")
     node.settled.add(sha256(node.last_preimage).hexdigest())
 
     # 0.0001% of 100000000 = 100 msat (0.1 sat) - rounded up to a full sat
     # (1000 msat) rather than left fractional, so the mint is never short
-    assert note_value(client, node.last_preimage.hex()) == 100000000 - 1000
+    assert note_value(client, secret) == 100000000 - 1000
 
 
 def test_pay_callback_rejects_amount_that_cannot_cover_the_fee(client: TestClient, monkeypatch):
@@ -138,9 +142,10 @@ def test_pay_callback_rejects_amount_below_min_mint(client: TestClient, monkeypa
 
 def test_mint_succeeds_at_exactly_min_mint(client: TestClient, node: FakeNode, monkeypatch):
     monkeypatch.setattr(settings, "min_mint_msat", 10_000)
-    client.get("/p/cb?amount=10000")
+    secret, comment = fresh_secret()
+    client.get(f"/p/cb?amount=10000&comment={comment}")
     node.settled.add(sha256(node.last_preimage).hexdigest())
-    assert note_value(client, node.last_preimage.hex()) == 10000
+    assert note_value(client, secret) == 10000
 
 
 def test_withdraw_callback_url_ignores_a_spoofed_host_header(client: TestClient, mint_note):
@@ -494,15 +499,15 @@ def test_melt_rejects_own_pending_invoice(client: TestClient, node: FakeNode, mi
     # settled yet) is rejected outright - it must not be paid over
     # Lightning (a self-payment to our own node) nor settled as a shortcut
     k1 = mint_note(5000)
-    response = client.get("/p/cb?amount=5000")
+    new_secret, new_comment = fresh_secret()
+    response = client.get(f"/p/cb?amount=5000&comment={new_comment}")
     pr = response.json()["pr"]
-    new_k1 = node.last_preimage.hex()
 
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
 
     assert node.paid == []
     assert note_value(client, k1) == 5000  # note untouched, still spendable
-    assert note_value(client, new_k1) is None  # the own invoice never got settled
+    assert note_value(client, new_secret) is None  # the own invoice never got settled
 
 
 def test_melt_rejects_already_settled_own_invoice(client: TestClient, node: FakeNode, mint_note):
@@ -511,10 +516,11 @@ def test_melt_rejects_already_settled_own_invoice(client: TestClient, node: Fake
     # ourselves"
     k1 = mint_note(5000)
     settled_k1 = mint_note(5000)
+    settled_payment_hash = sha256(node.last_preimage).hexdigest()
     # mint_note only settles at the (fake) node - force this mint to
     # actually observe and record that settlement (minted=1)
     assert note_value(client, settled_k1) == 5000
-    pr = fake_invoice(5000, sha256(bytes.fromhex(settled_k1)).hexdigest())
+    pr = fake_invoice(5000, settled_payment_hash)
 
     assert client.get(f"/w/cb?k1={k1}&pr={pr}").json()["status"] == "ERROR"
 

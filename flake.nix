@@ -168,7 +168,10 @@
               # pipefail turns a PASSING match into a flaky failure)
               machine.succeed("curl -sf http://localhost:8111/.well-known/lnurlp/_ | grep withdrawLink")
               # the mutating callback correctly reports the missing funding source
-              machine.succeed("curl -sf 'http://localhost:8111/p/cb?amount=50000' | grep 'not configured'")
+              # (comment is LUD-25's mandatory comment protection - see
+              # router.get_pay_callback - a well-formed one is required here to
+              # get past that check and reach the funding-source check this pins)
+              machine.succeed("curl -sf 'http://localhost:8111/p/cb?amount=50000&comment=0000000000000000000000000000000000000000000000000000000000000000' | grep 'not configured'")
               # the frontend one-pager renders
               machine.succeed("curl -sf http://localhost:8111/ | grep lnurl-mint")
             '';

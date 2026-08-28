@@ -109,13 +109,15 @@ def inflight(monkeypatch: pytest.MonkeyPatch) -> InFlightNode:
 
 def _mint_and_materialize(client: TestClient, node: InFlightNode) -> tuple[str, str]:
     """A settled, materialized note - returns (k1, note_id)."""
-    res = client.get(f"/p/cb?amount={VALUE}")
+    secret = urandom(32).hex()
+    comment = sha256(bytes.fromhex(secret)).hexdigest()
+    res = client.get(f"/p/cb?amount={VALUE}&comment={comment}")
     assert res.json().get("pr"), res.text
     preimage = node.last_preimage
     node.settled.add(sha256(preimage).hexdigest())
-    k1 = preimage.hex()
+    k1 = secret
     assert client.get(f"/w?k1={k1}").json().get("tag") == "withdrawRequest"
-    note_id = sha256(preimage).hexdigest()
+    note_id = comment
     assert notes.note_amount(note_id) == VALUE
     return k1, note_id
 
