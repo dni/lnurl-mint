@@ -88,9 +88,7 @@ def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
     assert notes.note_amount(victim_h) == 50_000
 
 
-def test_no_comment_mint_never_gets_far_enough_to_have_a_verify_url(
-    client: TestClient, node: FakeNode, monkeypatch
-):
+def test_no_comment_mint_never_gets_far_enough_to_have_a_verify_url(client: TestClient, node: FakeNode, monkeypatch):
     """The old exposure window in one picture, now closed even earlier than
     the verify-refusal fix: a no-comment mint request is rejected outright,
     so there's no payment_hash, no invoice, and nothing for /verify/{ph} to
