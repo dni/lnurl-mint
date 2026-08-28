@@ -1,6 +1,6 @@
-# lnurl-mint
+# LNURLmint - A lightning cash implementation
 
-Minimal backend implementing **lnurlcash** ([LUD-25](../luds/25.md)),
+A lightning backend implementing **lnurlcash** ([LUD-25](../luds/25.md)),
 Lightning bearer assets on top of plain [LUD-03](../luds/03.md)
 `withdrawRequest` and [LUD-06](../luds/06.md) `payRequest`. A stripped-down
 sibling of [lnurl_server](../lnurl_server); nothing but the mint.
