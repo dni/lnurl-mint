@@ -270,29 +270,19 @@ def test_t10_merge_url_budget_plaintext_fits_encrypted_does_not():
     assert len(encrypted) > 2000
 
 
-def test_t9_comment_is_silently_ignored_today(client: TestClient, node, monkeypatch):
-    """T9 - INVERTED: option B (comment-secret) landed, per the simplified
-    design in luds@cec741b (plain `comment = hex(sha256(secret))`, no
-    encryption, no composite k1 - superseding this file's original
-    "<secret>:<preimage>" sketch above).
+def test_t9_malformed_comment_is_now_rejected_outright(client: TestClient, node, monkeypatch):
+    """T9 - INVERTED AGAIN: option B (comment-secret) landed, per the
+    simplified design in luds@cec741b (plain `comment = hex(sha256(secret))`,
+    no encryption, no composite k1 - superseding this file's original
+    "<secret>:<preimage>" sketch above), and `comment` was originally a soft
+    requirement - a malformed or absent one silently fell back to the
+    ordinary k1=P note (fail-open, just visibly so via withheld verify).
 
-    /p/cb now takes a `comment` parameter with defined semantics, and picks
-    the fallback option this docstring anticipated over fail-closed: a
-    malformed or absent `comment` (like the bogus non-hex string here) is
-    never silently dropped in a way that changes what the wallet ends up
-    holding - it degrades to the ordinary k1=P note, but now visibly, by
-    withholding verify for that invoice (router.get_pay_callback) rather
-    than advertising it as usual."""
+    That fallback is now closed entirely: comment protection is mandatory
+    (router.get_pay_callback), and a malformed or absent `comment` (like the
+    bogus non-hex string here) is a hard rejection - fail-closed, no invoice
+    created, nothing for a wallet to end up holding at all."""
     monkeypatch.setattr(settings, "verify_enabled", True)
     r = client.get("/p/cb?amount=50000&comment=this-will-be-ignored").json()
-    assert r.get("pr")
-
-    # the malformed comment falls back cleanly: no verify advertised (unlike
-    # the old silent-downgrade behavior this test used to pin), but the
-    # settled preimage still redeems the note exactly as the no-comment path
-    # always has
-    assert "verify" not in r
-    node.settled.add(sha256(node.last_preimage).hexdigest())
-    k1 = node.last_preimage.hex()
-    _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
+    assert r["status"] == "ERROR"
+    assert "comment" in r["reason"].lower()

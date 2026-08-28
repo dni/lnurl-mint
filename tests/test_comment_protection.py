@@ -61,42 +61,34 @@ def test_valid_comment_note_redeems_normally_by_secret(client: TestClient, node:
     assert notes.note_amount(h) == VALUE
 
 
-def test_missing_comment_falls_back_to_preimage_keyed_note(client: TestClient, node: FakeNode):
-    resp = client.get(f"/p/cb?amount={VALUE}")
-    assert resp.json()["pr"]
-    node.settled.add(sha256(node.last_preimage).hexdigest())
-    preimage = node.last_preimage.hex()
-
-    data = client.get(f"/w?k1={preimage}").json()
-    assert data["tag"] == "withdrawRequest"
-    assert data["maxWithdrawable"] == VALUE
+def test_missing_comment_is_rejected(client: TestClient, node: FakeNode):
+    # comment protection is now mandatory (see get_pay_callback) - a
+    # preimage-keyed fallback note is no longer offered to new mints, since
+    # the preimage can leak to a route hop before settlement
+    resp = client.get(f"/p/cb?amount={VALUE}").json()
+    assert resp["status"] == "ERROR"
+    assert "comment" in resp["reason"].lower()
 
 
-def test_malformed_comment_falls_back_to_preimage_keyed_note(client: TestClient, node: FakeNode):
-    # not a bare hex-encoded 32-byte hash - per spec, this is never a hard
-    # error, it just doesn't engage comment protection
-    resp = client.get(f"/p/cb?amount={VALUE}&comment=not-a-hash")
-    assert resp.json()["pr"]
-    node.settled.add(sha256(node.last_preimage).hexdigest())
-    preimage = node.last_preimage.hex()
-
-    data = client.get(f"/w?k1={preimage}").json()
-    assert data["tag"] == "withdrawRequest"
-    assert data["maxWithdrawable"] == VALUE
+def test_malformed_comment_is_rejected(client: TestClient, node: FakeNode):
+    # not a bare hex-encoded 32-byte hash - now a hard error rather than a
+    # silent fallback to the no-comment path
+    resp = client.get(f"/p/cb?amount={VALUE}&comment=not-a-hash").json()
+    assert resp["status"] == "ERROR"
+    assert "comment" in resp["reason"].lower()
 
 
-def test_verify_advertised_only_with_a_valid_comment(client: TestClient, node: FakeNode, monkeypatch):
+def test_verify_advertised_whenever_verify_is_enabled(client: TestClient, node: FakeNode, monkeypatch):
     monkeypatch.setattr(settings, "verify_enabled", True)
 
     _, comment = fresh_secret()
     with_comment = client.get(f"/p/cb?amount={VALUE}&comment={comment}").json()
     assert with_comment.get("verify")
 
-    no_comment = client.get(f"/p/cb?amount={VALUE}").json()
-    assert "verify" not in no_comment
-
-    malformed = client.get(f"/p/cb?amount={VALUE}&comment=nope").json()
-    assert "verify" not in malformed
+    # comment is mandatory now, so both of these are rejected outright
+    # rather than falling back to a no-comment mint without verify
+    assert client.get(f"/p/cb?amount={VALUE}").json()["status"] == "ERROR"
+    assert client.get(f"/p/cb?amount={VALUE}&comment=nope").json()["status"] == "ERROR"
 
 
 def test_informational_get_lazily_settles_a_comment_protected_mint_without_verify(client: TestClient, node: FakeNode):

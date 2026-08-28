@@ -112,7 +112,8 @@ def test_pay_callback_one_create_invoice_per_call_stateful_bloat(client: TestCli
     # just a CPU one.
     prs = set()
     for _ in range(3):
-        resp = client.get("/p/cb?amount=50000")
+        _, comment = fresh_secret()
+        resp = client.get(f"/p/cb?amount=50000&comment={comment}")
         assert resp.status_code == 200
         prs.add(resp.json()["pr"])
         assert census.deltas() == {"create_invoice": 1}
@@ -145,9 +146,9 @@ def test_withdraw_info_census(client: TestClient, node: FakeNode, mint_note, cen
     # lazy settlement probe fires on EVERY request - no negative caching -
     # and the ERROR short-circuits before mint_pubkey. (Lnurl routes answer
     # errors as HTTP 200 + {"status": "ERROR", ...} - see error_handler.py.)
-    resp = client.get("/p/cb?amount=50000")
+    unsettled_k1, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount=50000&comment={comment}")
     assert resp.status_code == 200
-    unsettled_k1 = node.last_preimage.hex()
     census.deltas()  # discard /p/cb's own create_invoice
     for _ in range(3):
         r = client.get(f"/w?k1={unsettled_k1}")
