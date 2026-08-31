@@ -189,7 +189,7 @@ def test_index_while_sunsetting_says_what_a_holder_can_still_do(client: TestClie
     assert "no longer issuing notes" in response.text
     assert "melt" in response.text
     # the address stays, because recovering a note at the hosted wallet asks
-    # for it alongside the payment preimage
+    # for it alongside the note's secret
     assert f"{settings.username}@testserver" in response.text
     assert "https://wallet.lnurlcash.com" in response.text
     # everything that isn't about minting is untouched

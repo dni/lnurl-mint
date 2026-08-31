@@ -154,9 +154,9 @@ PAY_SECTION = Template(
   <button class="copy" data-copy="$lnurl" title="Copy LNURL">$lnurl</button>
   <button class="copy" data-copy="$address" title="Copy lightning address">&#9889; $address</button>
   <p class="hint">
-    After paying, redeem your bearer note at
+    Pay from an LNURLcash-aware wallet like
     <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
-    &mdash; enter the mint's lightning address (<code>$address</code>) and the payment preimage.
+    to mint a bearer note &mdash; it generates the note's secret and attaches it to the payment for you.
   </p>"""
 )
 
@@ -174,8 +174,7 @@ SUNSET_SECTION = Template(
     several into one, and melt into a Lightning invoice, all as before.
     Open the note in any LNURLcash wallet, or at
     <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
-    give this mint's address (<code>$address</code>) and the note's payment
-    preimage.
+    give this mint's address (<code>$address</code>) and the note's secret.
   </p>"""
 )
 
