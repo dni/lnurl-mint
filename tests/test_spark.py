@@ -56,20 +56,30 @@ def note_value(client: TestClient, k1: str) -> int | None:
     return data["maxWithdrawable"]
 
 
-def test_mint_whose_backend_returns_no_preimage_keys_the_note_by_the_invoice_hash(
+def test_mint_whose_backend_returns_no_preimage_keys_the_note_by_the_comment_hash(
     client: TestClient, spark_node: FakeNode
 ):
-    # the spark flow: /p/cb still answers with a payable invoice, but the
-    # note materializes under sha256(preimage) == the invoice's payment
-    # hash, which the router had to read off the invoice itself since the
-    # backend returned None
-    response = client.get("/p/cb?amount=5000")
+    # the spark flow under LUD-25's mandatory comment protection: /p/cb
+    # still answers with a payable invoice, the router reads the payment
+    # hash off the invoice itself (the backend returned None), settlement
+    # is detected through that hash, and the resulting note is keyed by
+    # the WALLET's comment hash - never by the invoice hash, and the
+    # preimage the wallet gets back from verify redeems nothing
+    secret = urandom(32)
+    comment_hash = sha256(secret).hexdigest()
+    response = client.get(f"/p/cb?amount=5000&comment={comment_hash}")
     assert response.json().get("pr"), response.text
     payment_hash = sha256(spark_node.last_preimage).hexdigest()
 
-    assert note_value(client, spark_node.last_preimage.hex()) is None
+    # not settled yet - not a note, even with the secret in hand
+    assert note_value(client, secret.hex()) is None
     spark_node.settled.add(payment_hash)
-    assert note_value(client, spark_node.last_preimage.hex()) == 5000
+    assert note_value(client, secret.hex()) == 5000
+
+    # a commentless mint is rejected outright per spec, before any
+    # invoice is ever created (and before the backend is touched)
+    assert client.get("/p/cb?amount=5000").json()["status"] == "ERROR"
+    assert spark_node.last_preimage.hex() != ""
 
 
 def test_no_preimage_mint_serves_its_secret_only_through_verify(

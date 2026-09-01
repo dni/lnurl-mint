@@ -25,11 +25,13 @@ instead generates and holds the preimage itself for an ordinary invoice
 (a caller-supplied payment_hash makes it a *hodl* invoice, which only the
 preimage holder can ever settle - and this mint deliberately does not
 keep preimages). So the spark backend returns None and the router takes
-the payment hash straight off the returned invoice. The preimage - for a
-no-comment mint, the note's entire bearer secret - is then only ever
-materialized live from the SDK's storage after settlement (see
-_invoice_preimage_spark), exactly like lnd's LookupInvoice echo, and only
-served through LUD-21 verify for comment-protected mints like there.
+the payment hash straight off the returned invoice. Since LUD-25 made
+comment protection mandatory, that preimage never becomes the note's
+bearer secret at all (every note is keyed by the WALLET's comment hash;
+the preimage is pure proof-of-payment, "safe to disclose anywhere" per
+the spec) - it is only ever materialized live from the SDK's storage
+after settlement (see _invoice_preimage_spark), exactly like lnd's
+LookupInvoice echo, and served through LUD-21 verify.
 
 **LUD-25 offline verification is unavailable, not adapted.** The spec
 fixes a note signature's digest as the "Lightning Signed Message"

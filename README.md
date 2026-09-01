@@ -343,9 +343,9 @@ Behavioral differences worth knowing (details in `spark.py`'s module
 docstring):
 
 - **The mint never sees a mint-invoice's preimage.** The SSP generates
-  and holds it; the note's `k1` (in the no-comment fallback, the
-  preimage) reaches the payer through the payment itself, and LUD-21
-  verify fetches it live from the SDK afterwards - the
+  and holds it; with comment protection mandatory the preimage is pure
+  proof-of-payment (never the note's secret), and LUD-21 verify fetches
+  it live from the SDK after settlement - the
   store-hashes-not-secrets policy holds either way, just more literally.
 - **LUD-25 offline verification is unavailable** - see above.
 - **Melt payments always take the Lightning route** (never a spark-routed
