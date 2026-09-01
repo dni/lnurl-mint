@@ -12,7 +12,9 @@ class LnurlPayResponse(BaseModel):
     protection: a WALLET attaches `comment=hex(sha256(secret))`, a bare
     hex-encoded 32-byte hash, to close the preimage race described in the
     spec's Security considerations (see router.get_pay_callback) - 64
-    hex chars, exactly what's advertised here."""
+    hex chars, exactly what's advertised here. `comment` is mandatory
+    here (missing or malformed rejects the mint outright), unlike LUD-12's
+    own optional/free-text default use."""
 
     tag: Literal["payRequest"] = "payRequest"
     callback: str
@@ -25,7 +27,8 @@ class LnurlPayResponse(BaseModel):
 
 class LnurlPayActionResponse(BaseModel):
     """LUD-06 callback response - paying `pr` mints a bearer note under the
-    payment preimage.
+    WALLET-held secret behind the mandatory `comment` (see
+    router.get_pay_callback), not the payment preimage.
 
     `verify` (LUD-21, optional) lets a wallet with no node of its own poll
     settlement status - omitted unless VERIFY_ENABLED is set.

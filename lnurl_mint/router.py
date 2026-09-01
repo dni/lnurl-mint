@@ -613,23 +613,23 @@ async def get_pay_callback(req: Request, amount: int, comment: str | None = None
     minus the advertised mint fee, if any (see _mint_fee_msat).
 
     `comment` (LUD-12) is LUD-25's comment protection (Protecting a freshly
-    minted note from a preimage race): a WALLET that sends a bare
-    hex-encoded 32-byte hash here is committing to a `secret` only it
-    knows, and once this invoice settles the resulting note is credited as
-    `k1=<secret>` instead of the payment preimage (see settle_mint) - the
-    preimage then redeems nothing, closing the routing-node preimage race
-    the spec's Security considerations describes. Anything else - no
-    `comment`, or one that isn't that exact shape - falls back to the
-    plain preimage-keyed note, per spec; `comment` is never rejected
-    outright for being the wrong shape, since a WALLET with no LNURLcash
-    support at all may send an ordinary LUD-12 comment here for unrelated
-    reasons.
+    minted note from a preimage race): a WALLET sends a bare hex-encoded
+    32-byte hash here, committing to a `secret` only it knows, and once
+    this invoice settles the resulting note is credited as `k1=<secret>`
+    instead of the payment preimage (see settle_mint) - the preimage then
+    redeems nothing, closing the routing-node preimage race the spec's
+    Security considerations describes. `comment` is now REQUIRED and MUST
+    be exactly that shape - a missing or malformed `comment` is rejected
+    outright rather than falling back to a preimage-keyed note, since a
+    preimage-keyed note is only as safe as the paying node's honesty about
+    forwarding it: a WALLET or route hop could otherwise observe the
+    preimage before settlement completes and steal the note.
 
     `verify` (LUD-21, only advertised if VERIFY_ENABLED) lets a wallet with
-    no node of its own poll settlement status - see verify_invoice. Gated
-    on `comment` here too: per spec, SERVICE MUST NOT offer verify in the
-    no-comment fallback, since there the preimage verify would hand out IS
-    the note's entire bearer secret."""
+    no node of its own poll settlement status - see verify_invoice. Safe to
+    always offer now that every mint uses comment protection - the
+    preimage verify_invoice could hand out is never the note's bearer
+    secret."""
     if settings.sunset_mint:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "This mint is sunsetting - minting is disabled.")
     if amount < settings.min_sendable_msat:
@@ -641,7 +641,12 @@ async def get_pay_callback(req: Request, amount: int, comment: str | None = None
         raise HTTPException(
             HTTPStatus.BAD_REQUEST, f"Amount too low to mint a note (min {settings.min_mint_msat} msat net of fees)."
         )
-    comment_hash = comment if comment is not None and HEX32_PATTERN.match(comment) else None
+    if comment is None or not HEX32_PATTERN.match(comment):
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            "Missing or malformed comment: a hex-encoded 32-byte hashed secret is required to mint.",
+        )
+    comment_hash = comment
     funding_source = _funding_source()
     try:
         pr, preimage = await create_invoice(amount, funding_source)
@@ -653,13 +658,12 @@ async def get_pay_callback(req: Request, amount: int, comment: str | None = None
     # is sha256(preimage); the spark backend cannot - its SSP generates
     # and holds the preimage (see spark.py's module docstring) - and
     # returns None instead, so there the hash is read straight off the
-    # invoice itself. The preimage (the future bearer secret in the
-    # no-comment fallback) reaches the buyer through the Lightning
-    # payment itself and is discarded here, per the spec's
-    # storing-hashes-not-secrets guidance - only the payment hash and the
-    # invoice itself (for LUD-21 verify) are stored. The invoice itself
-    # is for the full `amount` (what the payer actually pays); the note
-    # it produces is credited net of the mint fee.
+    # invoice itself. The preimage never becomes the bearer secret now
+    # that comment protection is mandatory, and is discarded here, per
+    # the spec's storing-hashes-not-secrets guidance - only the payment
+    # hash and the invoice itself (for LUD-21 verify) are stored. The
+    # invoice itself is for the full `amount` (what the payer actually
+    # pays); the note it produces is credited net of the mint fee.
     payment_hash = sha256(preimage).hexdigest() if preimage is not None else _created_invoice_payment_hash(pr)
     try:
         notes.create_mint(payment_hash, pr, net_amount_msat, comment_hash)
@@ -669,7 +673,7 @@ async def get_pay_callback(req: Request, amount: int, comment: str | None = None
     # spoofable via a plain Host header even behind a proxy - see
     # config.py's own public_base_url docstring) - same as get_lnaddress
     base = settings.public_base_url(str(req.base_url))
-    verify = f"{base}/verify/{payment_hash}" if settings.verify_enabled and comment_hash is not None else None
+    verify = f"{base}/verify/{payment_hash}" if settings.verify_enabled else None
     return LnurlPayActionResponse(pr=pr, verify=verify)
 
 

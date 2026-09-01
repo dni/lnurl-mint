@@ -27,7 +27,8 @@ from tests.conftest import FakeNode, fresh_secret
 def test_f1_verify_disclosure_requires_verify_enabled(client: TestClient, node: FakeNode):
     # VERIFY_ENABLED pinned false by conftest; /p/cb does not advertise verify
     assert settings.verify_enabled is False
-    resp = client.get("/p/cb?amount=50000")
+    victim_secret, comment = fresh_secret()
+    resp = client.get(f"/p/cb?amount=50000&comment={comment}")
     assert "verify" not in resp.json()
 
     preimage = node.last_preimage
@@ -42,7 +43,7 @@ def test_f1_verify_disclosure_requires_verify_enabled(client: TestClient, node: 
 
     # the note is the victim's to rotate, at whatever speed they like
     _, victim_h = fresh_secret()
-    rotate = client.get(f"/w/cb?k1={preimage.hex()}&h={victim_h}")
+    rotate = client.get(f"/w/cb?k1={victim_secret}&h={victim_h}")
     assert rotate.json()["status"] == "OK", rotate.text
     assert notes.note_amount(victim_h) == 50_000
 
@@ -86,7 +87,8 @@ def test_f4_rotate_onto_pending_mint_rejected_victim_unharmed(client: TestClient
     attacker_k1 = mint_note(10_000)
 
     # victim requests a mint invoice (unpaid); its pr embeds the payment_hash
-    client.get("/p/cb?amount=50000")
+    victim_secret, victim_comment = fresh_secret()
+    client.get(f"/p/cb?amount=50000&comment={victim_comment}")
     victim_preimage = node.last_preimage
     victim_ph = sha256(victim_preimage).hexdigest()
 
@@ -100,7 +102,7 @@ def test_f4_rotate_onto_pending_mint_rejected_victim_unharmed(client: TestClient
     # victim pays: the mint materializes for its full value, exactly as if
     # the attack never happened
     node.settled.add(victim_ph)
-    victim_info = client.get(f"/w?k1={victim_preimage.hex()}").json()
+    victim_info = client.get(f"/w?k1={victim_secret}").json()
     assert victim_info.get("tag") == "withdrawRequest", victim_info
     assert victim_info["maxWithdrawable"] == 50_000
     assert notes.mint_settled(victim_ph) is True

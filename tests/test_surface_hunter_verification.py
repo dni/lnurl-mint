@@ -5,15 +5,15 @@
   swap guard; the victim's mint materializes normally. (The exhaustive
   variant matrix - split h/h2, merge, settled-mint ids - lives in
   test_poc_a1_collision_griefing.py; this file keeps the canonical case.)
-- P1/F-3: FIXED (LUD-25 comment protection) - /verify used to hand a
-  settled mint's preimage to anyone holding the payment_hash when
-  VERIFY_ENABLED=true, and that preimage was the note's entire spend
-  secret. Now SERVICE refuses verify outright for any mint that skipped
-  `comment` (NoteStore.mint_uses_comment), and for one that used it the
-  disclosed preimage isn't the note's secret to begin with - see
-  test_p1_verify_no_longer_hands_out_the_no_comment_fallback_secret and
-  test_p1b_verify_is_harmless_once_comment_protection_is_used. The
-  VERIFY_ENABLED off switch itself is still pinned in
+- P1/F-3: FIXED - /verify used to hand a settled mint's preimage to anyone
+  holding the payment_hash when VERIFY_ENABLED=true, and that preimage was
+  the note's entire spend secret. LUD-25 comment protection is now
+  mandatory, so a no-comment mint (where this applied) is rejected at
+  /p/cb before an invoice - or a preimage to disclose - ever exists (see
+  test_p1_no_comment_mint_is_rejected_before_a_fallback_secret_can_exist);
+  and even for a mint that uses `comment`, the disclosed preimage isn't
+  the note's secret to begin with (test_p1b_verify_is_harmless_once_comment_protection_is_used).
+  The VERIFY_ENABLED off switch itself is still pinned in
   test_poc_verify_race.py.
 - P2/F-5: unauthenticated endpoints amplify into funding-source RPCs with
   no caching (availability concern) - GET /'s getinfo is the flip this
@@ -46,7 +46,8 @@ def test_p3_rotate_onto_pending_mint_is_rejected(client: TestClient, node: FakeN
     attacker_k1 = mint_note(10_000)
 
     # victim requests a mint invoice but has not paid it yet
-    client.get("/p/cb?amount=50000")
+    victim_secret, victim_comment = fresh_secret()
+    client.get(f"/p/cb?amount=50000&comment={victim_comment}")
     victim_preimage = node.last_preimage
     victim_ph = sha256(victim_preimage).hexdigest()
     assert notes.pending_mint(victim_ph) is not None
@@ -60,33 +61,24 @@ def test_p3_rotate_onto_pending_mint_is_rejected(client: TestClient, node: FakeN
 
     # victim pays -> their mint materializes for the full amount
     node.settled.add(victim_ph)
-    body = client.get(f"/w?k1={victim_preimage.hex()}").json()
+    body = client.get(f"/w?k1={victim_secret}").json()
     assert body.get("tag") == "withdrawRequest", body
     assert body["maxWithdrawable"] == 50_000, body
     assert notes.mint_settled(victim_ph) is True
 
 
-def test_p1_verify_no_longer_hands_out_the_no_comment_fallback_secret(client: TestClient, node: FakeNode, monkeypatch):
-    # FIXED by LUD-25 comment protection (router.get_pay_callback /
-    # NoteStore.mint_uses_comment): a mint that skipped `comment` falls back
-    # to k1=preimage, and that preimage IS the note's entire spend secret -
-    # so SERVICE now refuses verify for it outright, even with VERIFY_ENABLED
-    # on, instead of handing it to anyone who ever saw the invoice.
+def test_p1_no_comment_mint_is_rejected_before_a_fallback_secret_can_exist(
+    client: TestClient, node: FakeNode, monkeypatch
+):
+    # FIXED, one layer earlier than a verify refusal: LUD-25 comment
+    # protection (router.get_pay_callback) is now mandatory, so a mint that
+    # skips `comment` - which used to fall back to k1=preimage, the note's
+    # entire spend secret - never gets an invoice at all. There's no
+    # preimage-keyed fallback note left for /verify to ever disclose.
     monkeypatch.setattr(settings, "verify_enabled", True)
-    resp = client.get("/p/cb?amount=50000")
-    assert "verify" not in resp.json()
-    victim_preimage = node.last_preimage
-    payment_hash = sha256(victim_preimage).hexdigest()
-    node.settled.add(payment_hash)
-
-    assert client.get(f"/verify/{payment_hash}").json() == {"status": "ERROR", "reason": "Not found"}
-
-    # the victim's own preimage, learned the ordinary way (their own
-    # Lightning payment), still redeems the note normally - the fallback
-    # note itself is unaffected, only the remote-disclosure endpoint is closed
-    _, victim_h = fresh_secret()
-    rotate = client.get(f"/w/cb?k1={victim_preimage.hex()}&h={victim_h}")
-    assert rotate.json()["status"] == "OK", rotate.text
+    resp = client.get("/p/cb?amount=50000").json()
+    assert resp["status"] == "ERROR"
+    assert "comment" in resp["reason"].lower()
 
 
 def test_p1b_verify_is_harmless_once_comment_protection_is_used(client: TestClient, node: FakeNode, monkeypatch):

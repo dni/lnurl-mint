@@ -142,11 +142,12 @@ def hodl_client(hodl: HodlNode) -> TestClient:
 
 
 def mint_note(client: TestClient, node: HodlNode, amount_msat: int = VALUE) -> str:
-    res = client.get(f"/p/cb?amount={amount_msat}")
+    secret, comment = fresh_secret()
+    res = client.get(f"/p/cb?amount={amount_msat}&comment={comment}")
     assert res.status_code == 200, res.text
     preimage = node.last_preimage
     node.settled.add(sha256(preimage).hexdigest())
-    return preimage.hex()
+    return secret
 
 
 def outstanding(k1: str) -> int | None:

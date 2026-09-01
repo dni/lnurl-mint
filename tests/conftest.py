@@ -216,15 +216,19 @@ def client(node: FakeNode) -> TestClient:
 @pytest.fixture
 def mint_note(client: TestClient, node: FakeNode):
     """Mint a settled bearer note of the given value and return its k1
-    (the payment preimage), the way a wallet would obtain one: fetch an
-    invoice from the pay callback, then 'pay' it."""
+    (the wallet-chosen secret), the way a wallet would obtain one: commit
+    to a secret via LUD-25 comment protection (now mandatory, see
+    get_pay_callback), fetch an invoice from the pay callback, then 'pay'
+    it."""
 
     def _mint(amount_msat: int) -> str:
-        response = client.get(f"/p/cb?amount={amount_msat}")
+        secret = urandom(32)
+        comment_hash = sha256(secret).hexdigest()
+        response = client.get(f"/p/cb?amount={amount_msat}&comment={comment_hash}")
         assert response.json().get("pr"), response.text
         preimage = node.last_preimage
         node.settled.add(sha256(preimage).hexdigest())
-        return preimage.hex()
+        return secret.hex()
 
     return _mint
 
