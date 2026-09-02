@@ -350,6 +350,59 @@ def test_rotate_is_unaffected_by_mint_fees(client: TestClient, mint_note, monkey
     assert note_value(client, new_k1) == 5000
 
 
+def test_retried_rotate_replays_the_original_result(client: TestClient, mint_note):
+    # LUD-25 "Retrying a mutation": an exact repeat of a completed rotate
+    # (same k1, same h) must get the same {"status": "OK", "sig": ...} back,
+    # not "already spent" - a GET can get retried by transports that never
+    # ask WALLET first
+    k1 = mint_note(5000)
+    new_k1, h = fresh_secret()
+    first = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    second = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    assert first["status"] == "OK"
+    assert second == first
+    # still exactly one outstanding note from this rotate, not a second one
+    assert note_value(client, new_k1) == 5000
+
+
+def test_retried_split_replays_the_original_result(client: TestClient, mint_note):
+    k1 = mint_note(5000)
+    new_k1, h = fresh_secret()
+    change_k1, h2 = fresh_secret()
+    first = client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()
+    second = client.get(f"/w/cb?k1={k1}&amount=2000&h={h}&h2={h2}").json()
+    assert first["status"] == "OK"
+    assert second == first
+    assert note_value(client, new_k1) == 2000
+    assert note_value(client, change_k1) == 3000
+
+
+def test_retried_merge_replays_the_original_result(client: TestClient, mint_note):
+    a, b = mint_note(2000), mint_note(3000)
+    new_k1, h = fresh_secret()
+    first = client.get(f"/w/cb?k1={a}&k1={b}&h={h}").json()
+    second = client.get(f"/w/cb?k1={a}&k1={b}&h={h}").json()
+    # order of the repeated k1s must not matter either - same burn, same set
+    third = client.get(f"/w/cb?k1={b}&k1={a}&h={h}").json()
+    assert first["status"] == "OK"
+    assert second == first
+    assert third == first
+    assert note_value(client, new_k1) == 5000
+
+
+def test_retry_with_a_different_h_is_a_conflict_not_a_replay(client: TestClient, mint_note):
+    # same k1, but a different h than what was actually burned under - a
+    # genuine conflict (e.g. a buggy or malicious wallet), not a replay, and
+    # must still get the plain already-spent error
+    k1 = mint_note(5000)
+    _, h = fresh_secret()
+    _, other_h = fresh_secret()
+    first = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    assert first["status"] == "OK"
+    conflict = client.get(f"/w/cb?k1={k1}&h={other_h}").json()
+    assert conflict == {"status": "ERROR", "reason": "Invalid or already spent k1."}
+
+
 def test_melt_pays_invoice_of_exactly_the_notes_value(client: TestClient, node: FakeNode, mint_note):
     k1 = mint_note(5000)
     pr = fake_invoice(5000)

@@ -805,7 +805,12 @@ async def get_withdraw_callback(
       (NoteStore.swap); a k1 already reserved by another in-flight melt
       fails with reason "pending" instead (NoteStore.mark_pending).
     - split rejects outright while SUNSET_MINT is on, same as /p/cb - see
-      that setting's own docstring in config.py."""
+      that setting's own docstring in config.py.
+    - LUD-25's Retrying a mutation: a rotate/split/merge whose k1(s), h, h2
+      and amount exactly match an earlier completed one gets that same
+      result replayed (sig/sig2 recomputed, deterministic per RFC6979)
+      instead of "already spent" (see NoteStore.find_burn/swap). Melt is
+      unaffected - LUD-25 only asks this of rotate/split/merge."""
     if len(k1) > settings.max_k1s:
         raise HTTPException(HTTPStatus.BAD_REQUEST, f"Too many k1s (max {settings.max_k1s}).")
 
@@ -829,6 +834,34 @@ async def get_withdraw_callback(
             raise HTTPException(HTTPStatus.BAD_REQUEST, "missing h")
         if amount is not None and (h2 is None or not HEX32_PATTERN.match(h2)):
             raise HTTPException(HTTPStatus.BAD_REQUEST, "missing h2")
+
+        # LUD-25 "Retrying a mutation": a rotate/split/merge is a GET that
+        # mutates state once and only ever wants to say so once - an HTTP
+        # client's own timeout-retry, a proxy in between, or a flaky
+        # connection resending a request it never saw a reply for must see
+        # that same original result again, not "already spent" for a note
+        # this mint itself just burned. Checked here, before any k1 is
+        # resolved (a burned note fails that resolution from here on), so a
+        # genuine replay never falls through to the ordinary already-spent
+        # error below. Only an EXACT match (the same k1 set, h, h2 and
+        # amount as some earlier completed burn) counts as a replay; these
+        # same k1s under a different h/h2/amount is a genuine conflict, not
+        # a replay, and still needs to reach that same error - so this only
+        # short-circuits when every field matches.
+        if all(HEX32_PATTERN.match(note_k1) for note_k1 in k1):
+            burn = notes.find_burn([_note_id(note_k1) for note_k1 in k1])
+            if burn is not None:
+                recorded_h, recorded_h2, amount1_msat, amount2_msat = burn
+                recorded_amount = amount1_msat if recorded_h2 is not None else None
+                if recorded_h == h and recorded_h2 == h2 and recorded_amount == amount:
+                    funding_source = settings.funding_source()
+                    sig = await sign_note(recorded_h, amount1_msat, funding_source)
+                    sig2 = (
+                        await sign_note(recorded_h2, amount2_msat, funding_source)
+                        if recorded_h2 is not None and amount2_msat is not None
+                        else None
+                    )
+                    return WithdrawSuccessResponse(sig=sig, sig2=sig2)
 
     note_ids: list[str] = []
     values: list[int] = []

@@ -74,6 +74,14 @@ class NoteStore:
                 " pr TEXT NOT NULL,"  # the melted-into invoice, for LUD-25 melt verify
                 " settled INTEGER NOT NULL DEFAULT 0)"  # see mark_melt_settled
             )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS burns ("
+                " burn_key TEXT PRIMARY KEY,"  # sorted, '|'-joined note ids burned together, see _burn_key
+                " h TEXT NOT NULL,"
+                " h2 TEXT,"  # NULL unless this burn was a split
+                " amount1_msat INTEGER NOT NULL,"  # value minted under h
+                " amount2_msat INTEGER)"  # value minted under h2; NULL unless a split
+            )
             # add-a-column migrations for databases created before that
             # column existed - this mint has no other migration mechanism,
             # so the alternative would be telling an operator to delete
@@ -259,7 +267,15 @@ class NoteStore:
         bricking a paid mint for the price of a dust note. Raises
         PendingNoteError instead if any burn id is reserved by an
         in-flight melt (see mark_pending): per the spec, that's a
-        distinct "pending" rejection, not a plain invalid/spent one."""
+        distinct "pending" rejection, not a plain invalid/spent one.
+
+        Also records this burn (see find_burn) keyed by the exact set of
+        `burn_ids`, atomically alongside the burn/mint itself - LUD-25's
+        "Retrying a mutation" needs this to answer a retried rotate/split/
+        merge with the original result rather than "already spent", and
+        recording it in the same transaction means a crash between burning
+        the notes and recording the burn can never happen: either both
+        happened, or neither did."""
         with self._lock:
             try:
                 with self.conn:
@@ -279,10 +295,43 @@ class NoteStore:
                             # business but the operator's
                             raise ValueError("Invalid or already spent k1.")
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
+                    self.conn.execute(
+                        "INSERT INTO burns (burn_key, h, h2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            self._burn_key(burn_ids),
+                            mint_note_ids[0],
+                            mint_note_ids[1] if len(mint_note_ids) > 1 else None,
+                            mint_amounts[0],
+                            mint_amounts[1] if len(mint_amounts) > 1 else None,
+                        ),
+                    )
             except sqlite3.Error as exc:
                 # exc's own text (raw sqlite3 error) is never handed back on
                 # the wire - see log_internal_error
                 raise ValueError(log_internal_error("Note swap failed", exc)) from exc
+
+    @staticmethod
+    def _burn_key(note_ids: list[str]) -> str:
+        """Canonical identity of a burn: the note ids it spent, order
+        independent (a merge's k1s can arrive in any order) but otherwise
+        exact - the same set burned by two different requests is the same
+        burn. Used by both swap (to record a burn) and find_burn (to look
+        one up)."""
+        return "|".join(sorted(note_ids))
+
+    def find_burn(self, note_ids: list[str]) -> tuple[str, str | None, int, int | None] | None:
+        """If `note_ids`, as a set, were burned together by one earlier
+        rotate/split/merge (see swap), returns the (h, h2, amount1_msat,
+        amount2_msat) that burn produced - everything router.py's LUD-25
+        retry handling (Retrying a mutation) needs to answer a retried
+        callback with the original result instead of "already spent".
+        None if this exact set of note_ids was never burned together as a
+        single swap - including when it only partially overlaps one, which
+        is a genuine conflict, not a replay, and must still fail normally."""
+        row = self.conn.execute(
+            "SELECT h, h2, amount1_msat, amount2_msat FROM burns WHERE burn_key = ?", (self._burn_key(note_ids),)
+        ).fetchone()
+        return tuple(row) if row else None
 
     def record_melt(self, payment_hash: str, pr: str) -> None:
         """Record which invoice a melt is paying into, keyed by its
