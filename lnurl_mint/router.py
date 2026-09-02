@@ -858,7 +858,7 @@ async def get_withdraw_callback(
                     sig = await sign_note(recorded_h, amount1_msat, funding_source)
                     sig2 = (
                         await sign_note(recorded_h2, amount2_msat, funding_source)
-                        if recorded_h2 is not None
+                        if recorded_h2 is not None and amount2_msat is not None
                         else None
                     )
                     return WithdrawSuccessResponse(sig=sig, sig2=sig2)
