@@ -109,6 +109,31 @@ def test_cln_node_info_reports_public_graph_capacity_in_msat(monkeypatch):
     assert info.capacity == 150_000_000
 
 
+def test_cln_node_info_reports_every_advertised_address(monkeypatch):
+    # a node set up for Tor as well as clearnet reports more than one entry
+    # in `address` - every one of them is a valid way in, not just the
+    # first, and `uri` (the single primary connect string other callers key
+    # off) must stay == uris[0].
+    responses = {
+        "/v1/getinfo": httpx.Response(
+            200,
+            json={
+                "id": "abc",
+                "alias": "n",
+                "address": [
+                    {"type": "ipv4", "address": "1.2.3.4", "port": 9735},
+                    {"type": "torv3", "address": "xyz.onion", "port": 9735},
+                ],
+            },
+        ),
+        "/v1/listchannels": httpx.Response(200, json={"channels": []}),
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client_by_path(responses))
+    info = _run(_fetch_node_info_cln(CLN_CONFIG.url, "deadbeef", CLN_CONFIG))
+    assert info.uris == ["abc@1.2.3.4:9735", "abc@xyz.onion:9735"]
+    assert info.uri == "abc@1.2.3.4:9735"
+
+
 def test_cln_node_info_capacity_failure_is_swallowed(monkeypatch, caplog):
     responses = {
         "/v1/getinfo": httpx.Response(200, json={"id": "abc", "alias": "n"}),

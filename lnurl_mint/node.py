@@ -576,6 +576,14 @@ class NodeInfo(BaseModel):
 
     alias: str | None = None
     uri: str | None = None  # node_key@host:port, or the bare pubkey if unannounced
+    # every announced address, each already "node_key@host:port" - a node
+    # can advertise more than one (e.g. a clearnet address plus a Tor v3
+    # onion), and `uri` alone only ever surfaced the first, silently
+    # dropping the rest. `uri` is kept (== uris[0] when non-empty) since
+    # several callers key off a single connect string to derive the bare
+    # pubkey (signing.mint_pubkey, server.py's startup log, the mint-address
+    # discovery endpoint) or to render one primary row on the frontend.
+    uris: list[str] = []
     color: str | None = None  # "#rrggbb", the node's self-reported display color
     num_channels: int = 0
     num_peers: int = 0
@@ -688,6 +696,7 @@ async def _fetch_node_info_lnd(url: str, macaroon: str, config: LightningBackend
     return NodeInfo(
         alias=info.get("alias") or None,
         uri=uris[0] if uris else info.get("identity_pubkey"),
+        uris=uris,
         color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),
@@ -734,13 +743,24 @@ async def _fetch_node_info_cln(url: str, rune: str, config: LightningBackendConf
                     capacity_msat += int(c.get("amount_msat", 0))
             except Exception as exc:
                 logging.warning("fetch_node_info: could not fetch capacity from cln's listchannels: %s", exc)
-    uri = node_id
     addresses = info.get("address") or []
-    if node_id and addresses and addresses[0].get("address") and addresses[0].get("port"):
-        uri = f"{node_id}@{addresses[0]['address']}:{addresses[0]['port']}"
+    # a node can have more than one address bound - e.g. a clearnet address
+    # plus a Tor v3 onion added for privacy - and every one of them is a
+    # valid way in, not just the first
+    uris = (
+        [
+            f"{node_id}@{addr['address']}:{addr['port']}"
+            for addr in addresses
+            if addr.get("address") and addr.get("port")
+        ]
+        if node_id
+        else []
+    )
+    uri = uris[0] if uris else node_id
     return NodeInfo(
         alias=info.get("alias") or None,
         uri=uri,
+        uris=uris,
         color=_normalize_color(info.get("color")),
         num_channels=int(info.get("num_active_channels", 0)) + int(info.get("num_inactive_channels", 0)),
         num_peers=int(info.get("num_peers", 0)),

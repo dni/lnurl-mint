@@ -113,6 +113,14 @@ class LnurlMintAddressResponse(BaseModel):
     payLink: str
     nodeAlias: str | None = None
     nodeUri: str | None = None
+    # every address this node advertises, each already "node_key@host:port"
+    # (see node.NodeInfo.uris, == [nodeUri] in the common single-address
+    # case) - a node behind Tor as well as clearnet, for instance, has more
+    # than one, and nodeUri alone only ever carried the first. None (not an
+    # empty list) when there's no funding source or nothing announced,
+    # consistent with every other optional field here (see
+    # LnurlErrorResponseHandler's response_model_exclude_none).
+    nodeUris: list[str] | None = None
     nodeColor: str | None = None
     nodeCapacity: int | None = None  # msat - see node.NodeInfo.capacity
     # same channel/peer counts NODE_SECTION already shows on the one-pager

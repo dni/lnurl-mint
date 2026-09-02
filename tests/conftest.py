@@ -116,6 +116,10 @@ class FakeNode:
         # sign_note) exercise the real "Lightning Signed Message" signing
         # and recovery logic without a real lnd/cln node
         self.identity_key = PrivateKey()
+        # override to simulate a node with more than one advertised address
+        # (e.g. clearnet + Tor) - None means "just the single 127.0.0.1
+        # address" (see fetch_node_info below)
+        self.uris: list[str] | None = None
 
     @property
     def pubkey(self) -> str:
@@ -164,9 +168,11 @@ class FakeNode:
         return self.melt_preimages.get(payment_hash)
 
     async def fetch_node_info(self, config) -> NodeInfo:
+        uris = self.uris if self.uris is not None else [f"{self.pubkey}@127.0.0.1:9735"]
         return NodeInfo(
             alias="fakenode",
-            uri=f"{self.pubkey}@127.0.0.1:9735",
+            uri=uris[0],
+            uris=uris,
             color="#3399ff",
             num_channels=3,
             num_peers=5,
