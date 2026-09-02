@@ -47,6 +47,16 @@ def test_index_shows_node_info(client: TestClient, node):
     assert f"{node.pubkey}@127.0.0.1:9735" in response.text
 
 
+def test_index_shows_every_advertised_connect_string(client: TestClient, node):
+    # a node behind Tor as well as clearnet advertises more than one
+    # address (see node.NodeInfo.uris) - the page must surface all of
+    # them, not just the first.
+    node.uris = [f"{node.pubkey}@1.2.3.4:9735", f"{node.pubkey}@xyz.onion:9735"]
+    response = client.get("/")
+    assert f"{node.pubkey}@1.2.3.4:9735" in response.text
+    assert f"{node.pubkey}@xyz.onion:9735" in response.text
+
+
 def test_index_shows_explorer_links(client: TestClient, node):
     response = client.get("/")
     assert f"https://mempool.space/lightning/node/{node.pubkey}" in response.text
@@ -119,6 +129,13 @@ def test_mint_address_combines_withdraw_and_node_info(client: TestClient, node):
     assert data["mintPubkey"] == node.pubkey
     # theoretical/informational only - no real note k1 backs this address
     assert "k1" not in data
+
+
+def test_mint_address_reports_every_advertised_connect_string(client: TestClient, node):
+    node.uris = [f"{node.pubkey}@1.2.3.4:9735", f"{node.pubkey}@xyz.onion:9735"]
+    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
+    assert data["nodeUri"] == f"{node.pubkey}@1.2.3.4:9735"
+    assert data["nodeUris"] == node.uris
 
 
 def test_mint_address_max_withdrawable_accounts_for_mint_fee(client: TestClient, node, monkeypatch):

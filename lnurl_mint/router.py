@@ -533,12 +533,14 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
     base, host = settings.public_base_url_and_host(str(req.base_url))
     funding_source = settings.funding_source()
     node_alias = node_uri = node_color = mint_pubkey_value = None
+    node_uris = None
     node_capacity = node_num_channels = node_num_peers = None
     if funding_source.backend:
         try:
             info = await cached_fetch_node_info(funding_source)
             node_alias = info.alias
             node_uri = info.uri
+            node_uris = info.uris or None
             node_color = info.color
             node_capacity = info.capacity
             node_num_channels = info.num_channels
@@ -558,6 +560,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
         payLink=f"{base}/.well-known/lnurlp/{settings.username}",
         nodeAlias=node_alias,
         nodeUri=node_uri,
+        nodeUris=node_uris,
         nodeColor=node_color,
         nodeCapacity=node_capacity,
         nodeNumChannels=node_num_channels,

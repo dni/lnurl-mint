@@ -195,12 +195,20 @@ NODE_SECTION = Template(
     <tr><td>Alias</td><td class="mono">$alias</td></tr>
     $color_row
     <tr><td>Public key</td><td class="mono value-row"><span>$pubkey</span>$pubkey_copy</td></tr>
-    <tr><td>Connect string</td><td class="mono value-row"><span>$connect_string</span>$connect_copy</td></tr>
+    $connect_rows
     <tr><td>Channels</td><td class="mono">$num_channels</td></tr>
     <tr><td>Peers</td><td class="mono">$num_peers</td></tr>
     <tr><td>Capacity</td><td class="mono">$capacity</td></tr>
     $explorers_row
   </table>"""
+)
+
+# One row per advertised address (see node.NodeInfo.uris) - a node with
+# both a clearnet and a Tor address gets two of these, only the first
+# carrying the row label so it reads as one "Connect string" entry with
+# multiple values rather than several unrelated rows.
+CONNECT_ROW = Template(
+    """<tr><td>$label</td><td class="mono value-row"><span>$connect_string</span>$connect_copy</td></tr>"""
 )
 
 EXPLORERS_ROW = Template(
@@ -315,9 +323,26 @@ async def _node_section() -> tuple[str, str | None]:
         return '<p class="muted">Funding source node is unreachable.</p>', None
     # node.uri is "pubkey@host:port" once the node has an announced address,
     # or just the bare pubkey otherwise (see node._fetch_node_info_lnd/cln) -
-    # split so the pubkey and the full connect string each get their own row.
+    # split so the pubkey and the full connect string(s) each get their own
+    # row(s).
     pubkey, _, host = (node.uri or "").partition("@")
-    connect_string = node.uri if host else None
+    # node.uris holds every announced address (a node behind Tor as well as
+    # clearnet has more than one); falls back to the single node.uri when
+    # uris wasn't populated (node.uri is always uris[0] when uris is
+    # non-empty - see node.NodeInfo) - empty exactly when host is, i.e.
+    # this node has nothing beyond a bare pubkey to connect to yet.
+    connect_uris = node.uris or ([node.uri] if host and node.uri else [])
+    if connect_uris:
+        connect_rows = "".join(
+            CONNECT_ROW.substitute(
+                label="Connect string" if i == 0 else "",
+                connect_string=html.escape(uri),
+                connect_copy=_copy_button(uri, "Copy connect string"),
+            )
+            for i, uri in enumerate(connect_uris)
+        )
+    else:
+        connect_rows = CONNECT_ROW.substitute(label="Connect string", connect_string="-", connect_copy="")
     # node.color is already validated as a well-formed "#rrggbb" or None
     # by node._normalize_color - substituted into the style attribute below
     # unescaped, so nothing malformed can reach this point in the first place
@@ -332,8 +357,7 @@ async def _node_section() -> tuple[str, str | None]:
         color_row=color_row,
         pubkey=html.escape(pubkey or "-"),
         pubkey_copy=_copy_button(pubkey, "Copy public key"),
-        connect_string=html.escape(connect_string or "-"),
-        connect_copy=_copy_button(connect_string, "Copy connect string"),
+        connect_rows=connect_rows,
         num_channels=node.num_channels,
         num_peers=node.num_peers,
         explorers_row=explorers_row,
