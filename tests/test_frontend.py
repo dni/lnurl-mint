@@ -4,8 +4,8 @@ from bech32 import bech32_decode, convertbits
 from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
+from lnurl_mint.db import notes
 from lnurl_mint.frontend import lnurl_encode
-from tests.conftest import fake_invoice, fresh_secret
 
 ONION = "http://abcdefghijklmnop1234567890abcdefghijklmnop1234567890abcdefgh.onion"
 
@@ -183,69 +183,32 @@ def test_mint_address_omits_sunset_date_when_unset(client: TestClient, node):
     assert "sunsetDate" not in data
 
 
-def test_mint_address_reports_zero_outstanding_notes_when_none_exist(client: TestClient):
+def test_mint_address_reports_outstanding_msat(client: TestClient, monkeypatch):
+    # NoteStore.outstanding_msat's own correctness (materialization,
+    # rotate/melt bookkeeping) has its own tests in test_verify.py against
+    # an isolated NoteStore - this only checks the endpoint echoes it
+    # verbatim, without depending on the test session's shared database
+    monkeypatch.setattr(notes, "outstanding_msat", lambda: 123_000)
     data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
-    assert data["outstandingNotesCount"] == 0
-    assert data["outstandingNotesMsat"] == 0
+    assert data["outstandingNotesMsat"] == 123_000
 
 
-def test_mint_address_reports_outstanding_notes_total(client: TestClient, mint_note):
-    mint_note(2000)
-    mint_note(3000)
-    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
-    assert data["outstandingNotesCount"] == 2
-    assert data["outstandingNotesMsat"] == 5000
-
-
-def test_mint_address_outstanding_notes_survive_a_rotate(client: TestClient, mint_note):
-    # a rotate burns one note but mints a replacement of the same value -
-    # the outstanding count and total must be unaffected
-    k1 = mint_note(2000)
-    mint_note(3000)
-    _, h = fresh_secret()
-    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"
-    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
-    assert data["outstandingNotesCount"] == 2
-    assert data["outstandingNotesMsat"] == 5000
-
-
-def test_mint_address_outstanding_notes_drops_a_melted_note(client: TestClient, node, mint_note):
-    # unlike a rotate, a melt burns a note with no replacement - the
-    # outstanding total must actually go down
-    k1 = mint_note(2000)
-    mint_note(3000)
-    pr = fake_invoice(2000)
-    assert client.get(f"/w/cb?k1={k1}&pr={pr}").json() == {"status": "OK"}
-    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
-    assert data["outstandingNotesCount"] == 1
-    assert data["outstandingNotesMsat"] == 3000
-
-
-def test_index_shows_outstanding_notes(client: TestClient, mint_note):
-    mint_note(2000)
-    mint_note(3000)
+def test_index_shows_outstanding_value(client: TestClient, monkeypatch):
+    monkeypatch.setattr(notes, "outstanding_msat", lambda: 2000)
     response = client.get("/")
     assert "Outstanding notes" in response.text
-    assert ">2<" in response.text  # note count
-    assert "5 sats" in response.text  # combined value
+    assert "2 sats" in response.text
 
 
-def test_index_shows_zero_outstanding_notes_by_default(client: TestClient):
-    response = client.get("/")
-    assert "Outstanding notes" in response.text
-    assert ">0<" in response.text
-    assert "0 sats" in response.text
-
-
-def test_index_shows_outstanding_notes_even_while_sunsetting(client: TestClient, mint_note, monkeypatch):
+def test_index_shows_outstanding_value_even_while_sunsetting(client: TestClient, monkeypatch):
     # unlike the Mint table (hidden while sunsetting, since there's nothing
     # left to mint), a sunsetting mint still owes every outstanding note -
     # that's exactly when a holder most wants to see this number
-    mint_note(2000)
+    monkeypatch.setattr(notes, "outstanding_msat", lambda: 2000)
     monkeypatch.setattr(settings, "sunset_mint", True)
     response = client.get("/")
     assert "Outstanding notes" in response.text
-    assert ">1<" in response.text
+    assert "2 sats" in response.text
 
 
 def test_index_shows_capacity_and_mint_limits(client: TestClient, node):

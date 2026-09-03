@@ -242,7 +242,6 @@ LIMITS_SECTION = Template(
 
 OUTSTANDING_SECTION = Template(
     """<table>
-    <tr><td>Notes</td><td class="mono">$count</td></tr>
     <tr><td>Total value</td><td class="mono">$value</td></tr>
   </table>"""
 )
@@ -344,15 +343,13 @@ def _limits_section() -> str:
 
 
 def _outstanding_section() -> str:
-    """The Outstanding table's HTML: how many bearer notes this mint has
-    issued and never burned, and their combined value (NoteStore.
-    outstanding_notes) - this mint's total liability, straight from its own
-    database. Unlike the Node table below, this needs no funding source and
-    is never hidden while sunsetting: a sunsetting mint still owes every
-    outstanding note, and that's exactly when a holder most wants to see
-    this number."""
-    count, amount_msat = notes.outstanding_notes()
-    return OUTSTANDING_SECTION.substitute(count=f"{count:,}", value=_format_sats(amount_msat))
+    """The Outstanding table's HTML: the combined value of every bearer note
+    this mint has issued and never burned (NoteStore.outstanding_msat) -
+    this mint's total liability, straight from its own database. Unlike the
+    Node table below, this needs no funding source and is never hidden
+    while sunsetting: a sunsetting mint still owes every outstanding note,
+    and that's exactly when a holder most wants to see this number."""
+    return OUTSTANDING_SECTION.substitute(value=_format_sats(notes.outstanding_msat()))
 
 
 async def _node_section() -> tuple[str, str | None]:

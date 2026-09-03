@@ -141,12 +141,11 @@ class LnurlMintAddressResponse(BaseModel):
     # actually stops minting): the whole point is to let a wallet warn its
     # user *before* that happens, not just report it once it already has.
     sunsetDate: str | None = None
-    # this mint's total outstanding liability (see NoteStore.outstanding_notes)
-    # - how many bearer notes it has issued and never burned, and their
-    # combined value, msat. Unlike the node fields above, always present:
-    # it's a fact about this mint's own database, not the funding source,
-    # so it's reported even when that's unreachable or unconfigured.
-    outstandingNotesCount: int = 0
+    # this mint's total outstanding liability, msat (see
+    # NoteStore.outstanding_msat) - the combined value of every bearer note
+    # it has issued and never burned. Unlike the node fields above, always
+    # present: it's a fact about this mint's own database, not the funding
+    # source, so it's reported even when that's unreachable or unconfigured.
     outstandingNotesMsat: int = 0
 
 
