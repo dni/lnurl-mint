@@ -717,6 +717,64 @@ def test_withdraw_requires_k1(client: TestClient):
     assert client.get("/w").json()["status"] == "ERROR"
 
 
+def test_withdraw_by_hash_reports_the_same_note_without_the_secret(client: TestClient, mint_note):
+    # LUD-25 "Checking a note without exposing it": ?h= is a second way in
+    # for the same lookup, keyed by the note's id (sha256(k1)) directly
+    k1 = mint_note(5000)
+    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    by_k1 = client.get(f"/w?k1={k1}").json()
+    by_h = client.get(f"/w?h={note_id}").json()
+    assert by_h["minWithdrawable"] == by_h["maxWithdrawable"] == 5000
+    assert by_h["callback"] == by_k1["callback"]
+    # unlike the k1 lookup, the response never echoes a secret it wasn't
+    # given - a caller who queried by hash already holds the raw k1
+    assert "k1" not in by_h
+    assert by_k1["k1"] == k1
+
+
+def test_withdraw_by_hash_never_burns_the_note(client: TestClient, mint_note):
+    k1 = mint_note(5000)
+    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    client.get(f"/w?h={note_id}")
+    assert note_value(client, k1) == 5000
+
+
+def test_withdraw_by_hash_rejects_an_unknown_hash(client: TestClient):
+    result = client.get(f"/w?h={urandom(32).hex()}").json()
+    assert result == {"status": "ERROR", "reason": "Unknown note."}
+
+
+def test_withdraw_by_hash_reports_already_spent_the_same_way_k1_would(client: TestClient, mint_note):
+    k1 = mint_note(5000)
+    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    new_k1, h = fresh_secret()
+    assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"  # rotate, burns k1
+    assert client.get(f"/w?h={note_id}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "Note already spent."}
+
+
+def test_withdraw_requires_exactly_one_of_k1_or_h(client: TestClient, mint_note):
+    k1 = mint_note(5000)
+    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    assert client.get("/w").json()["status"] == "ERROR"
+    assert client.get(f"/w?k1={k1}&h={note_id}").json()["status"] == "ERROR"
+
+
+def test_withdraw_by_hash_reports_pending_the_same_way_k1_would(
+    client: TestClient, node: FakeNode, mint_note, monkeypatch
+):
+    k1 = mint_note(5000)
+    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    pr = fake_invoice(5000)
+    node.pay_delay = 0.3
+
+    thread = _melt_in_background(client, k1, pr, monkeypatch)
+    pending = client.get(f"/w?h={note_id}").json()
+    thread.join()
+
+    assert pending == {"status": "ERROR", "reason": "pending"}
+
+
 def test_withdraw_reports_unknown_k1_distinctly_from_spent(client: TestClient, mint_note):
     # a k1 this mint never issued at all gets a different reason than one
     # it issued and has since burned - both fail the same GET /w lookup,

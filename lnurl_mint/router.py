@@ -420,6 +420,19 @@ async def _resolve_note(k1: str) -> tuple[str, int] | None:
     return (note_id, amount_msat) if amount_msat is not None else None
 
 
+async def _resolve_note_by_hash(h: str) -> tuple[str, int] | None:
+    """(id, value) of the outstanding note whose id (sha256(k1) hex) is
+    literally `h` - LUD-25's "Checking a note without exposing it"
+    (router.get_withdraw's `h` query param). Unlike _resolve_note, no
+    hashing happens here: `h` already *is* the note id this store keys
+    every note by internally, so this is just _note_amount_by_id with the
+    same not-found/HEX32 handling _resolve_note gives a raw k1."""
+    if not HEX32_PATTERN.match(h):
+        return None
+    amount_msat = await _note_amount_by_id(h)
+    return (h, amount_msat) if amount_msat is not None else None
+
+
 def _mint_fee_msat(amount_msat: int) -> int:
     """The fee withheld from a mint of `amount_msat` (LUD-25's optional mint
     fee): a flat base_fee_msat plus fee_percent_ppm parts-per-million of the
@@ -719,15 +732,29 @@ async def verify_invoice(payment_hash: str) -> LnurlPayVerifyResponse:
 
 
 @router.get("/w", tags=["lnurlcash"])
-async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> LnurlWithdrawResponse:
-    """LUD-03 withdrawRequest for the bearer note `k1`. Purely informational:
-    it never burns or alters the note (which is what makes it safe for any
+async def get_withdraw(
+    req: Request, k1: str | None = None, h: str | None = None, amount: int | None = None
+) -> LnurlWithdrawResponse:
+    """LUD-03 withdrawRequest for a bearer note. Purely informational: it
+    never burns or alters the note (which is what makes it safe for any
     wallet to inspect a note's value without consuming it), so the mutating
     callback below lives on a distinct URL, as the spec requires.
     minWithdrawable == maxWithdrawable states the note's value
-    authoritatively. The response's `k1` MUST echo the literal secret it was
-    queried with - never a derived or opaque identifier - so a wallet can
-    copy it verbatim into a new note URL or the callback.
+    authoritatively.
+
+    Exactly one of `k1`/`h` must be given. With `k1`, the response's `k1`
+    MUST echo the literal secret it was queried with - never a derived or
+    opaque identifier - so a wallet can copy it verbatim into a new note
+    URL or the callback.
+
+    `h` (LUD-25's "Checking a note without exposing it") is the hex sha256
+    of `k1`, accepted here in place of it and ONLY here, never at /w/cb -
+    this store already keys every note by that same hash internally, so
+    it's just a second way in for a lookup it can already do. The response
+    then omits `k1` (see LnurlWithdrawResponse): the convenience that field
+    normally serves doesn't apply to a caller who queried by hash, since it
+    already holds the raw k1. An unrecognized `h` - never registered or
+    already spent - gets the same response an unknown `k1` would.
 
     `amount` is accepted only because a note's URL encodes a
     (wallet-declared, unauthoritative) value as `?k1=...&amount=...` - it
@@ -739,9 +766,19 @@ async def get_withdraw(req: Request, k1: str, amount: int | None = None) -> Lnur
     so a freshly minted note needs no separate field - only notes obtained
     via this endpoint's callback (rotate/split/merge, which have no
     invoice) do."""
-    resolved = await _resolve_note(k1)
+    if (k1 is None) == (h is None):
+        raise HTTPException(HTTPStatus.BAD_REQUEST, "Specify exactly one of k1 or h.")
+
+    if k1 is not None:
+        resolved = await _resolve_note(k1)
+        already_spent = bool(HEX32_PATTERN.match(k1) and notes.note_spent(_note_id(k1)))
+    else:
+        assert h is not None
+        resolved = await _resolve_note_by_hash(h)
+        already_spent = bool(HEX32_PATTERN.match(h) and notes.note_spent(h))
+
     if resolved is None:
-        if HEX32_PATTERN.match(k1) and notes.note_spent(_note_id(k1)):
+        if already_spent:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Note already spent.")
         raise HTTPException(HTTPStatus.BAD_REQUEST, "Unknown note.")
     note_id, amount_msat = resolved

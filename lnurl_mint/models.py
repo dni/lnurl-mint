@@ -74,13 +74,20 @@ class LnurlWithdrawResponse(BaseModel):
     equals the note's value, which is how a wallet reads a note's worth
     (this GET is informational and never burns anything).
 
+    `k1` is optional (unlike plain LUD-03) to support LUD-25's "Checking a
+    note without exposing it": when the note was looked up by `h` rather
+    than `k1` (router.get_withdraw), there is no raw secret to echo back -
+    the field is omitted from the response entirely (see
+    LnurlErrorResponseHandler's response_model_exclude_none) rather than
+    sent as null, exactly the shape the spec says to use.
+
     `mintPubkey` (LUD-25 Offline verification, optional) is this mint's
     signing key - omitted entirely if no funding source is configured
     (see signing.mint_pubkey)."""
 
     tag: Literal["withdrawRequest"] = "withdrawRequest"
     callback: str
-    k1: str
+    k1: str | None = None
     minWithdrawable: int
     maxWithdrawable: int
     defaultDescription: str = ""
