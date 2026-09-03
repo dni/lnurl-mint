@@ -58,11 +58,21 @@ class LightningBackendConfig(BaseModel):
     once by the operator - see config.Settings.funding_source). Only the
     field(s) relevant to `backend` are ever read."""
 
-    backend: Literal["lnd", "cln"] | None = None
+    backend: Literal["lnd", "cln", "spark"] | None = None
     url: str | None = None
     macaroon: SecretStr | None = None  # lnd
     rune: SecretStr | None = None  # cln
     cert_path: str | None = None  # pin verification to a self-signed cert
+    # spark (see spark.py - the breez-sdk-spark wallet this mint funds
+    # itself with): the wallet's BIP39 mnemonic, the Breez API key its
+    # services want, which network to talk to, where the SDK keeps its
+    # own sqlite store, and how often its background loop syncs
+    spark_mnemonic: SecretStr | None = None
+    spark_api_key: SecretStr | None = None
+    spark_network: Literal["mainnet", "regtest"] = "mainnet"
+    spark_storage_dir: str | None = None
+    spark_sync_interval_secs: int = 15
+    spark_account_number: int | None = None
 
     @property
     def verify(self) -> bool | ssl.SSLContext:
@@ -87,7 +97,17 @@ async def _dispatch(
     "which backend" branch itself) would otherwise be copy-pasted into
     every public function in this module - `operation` is just that
     function's own name, for an unsupported-backend error that still
-    points at the right one."""
+    points at the right one.
+
+    The spark backend has no url/credential pair - its credentials live
+    in the process-wide SDK singleton spark.py builds from config - so
+    its branch dispatches by operation name to `fn(*leading, config,
+    *trailing)` instead (imported lazily: spark.py imports this module's
+    shared types, so a module-level import would be circular)."""
+    if config.backend == "spark":
+        from .spark import dispatch as spark_dispatch
+
+        return await spark_dispatch(operation, config, leading, trailing)
     if config.backend == "lnd":
         if not config.url or not config.macaroon:
             raise ValueError("Macaroon is required.")
@@ -101,7 +121,13 @@ async def _dispatch(
 
 async def create_invoice(
     amount_msat: int, config: LightningBackendConfig, memo: str = "lnurlcash mint"
-) -> tuple[str, bytes]:
+) -> tuple[str, bytes | None]:
+    """The preimage half of the result is None for the spark backend -
+    its SSP generates and holds the preimage itself (see spark.py's
+    module docstring), so there the caller takes the payment hash off
+    the returned invoice instead of sha256(preimage); lnd/cln both let
+    the caller supply the preimage, so those return it and nothing else
+    ever needs to."""
     return await _dispatch(
         "create_invoice", config, _create_invoice_lnd, _create_invoice_cln, amount_msat, trailing=(memo,)
     )
