@@ -90,15 +90,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # it at import time gets silently undone by that later reconfiguration.
     logging.getLogger("uvicorn.access").disabled = True
 
-    # a misconfigured or unreachable funding source degrades every
-    # funding-source-backed feature (minting, melting, LUD-25 offline
-    # verification) silently and per-request rather than failing outright
-    # (see signing.mint_pubkey/sign_note, router._funding_source) - that's
-    # the right behavior for a request, but an operator should still find
-    # out from the logs at boot, not from a wallet failing to mint hours
-    # later. This check is purely diagnostic: it changes no runtime
-    # behavior, and every route still probes the funding source fresh on
-    # its own.
+    # A misconfigured or unreachable funding source makes every backed
+    # feature unavailable. Note lookup and mutation now fail closed when
+    # the mandatory LUD-25 signer is unavailable; an operator should still
+    # find out at boot rather than from a wallet request hours later. This
+    # check remains diagnostic: every route probes the required capability
+    # on its own.
     funding_source = settings.funding_source()
     monitor_task: asyncio.Task | None = None
     if not funding_source.backend:

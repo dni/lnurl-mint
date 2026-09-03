@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date
 from typing import Literal
 from urllib.parse import urlparse
@@ -24,10 +25,10 @@ class Settings(BaseSettings):
 
     # this mint's own funding source, configured once by the operator - used
     # to create the invoices that mint bearer notes and to pay the invoices
-    # that melt them, and to sign notes for LUD-25's optional Offline
-    # verification via the node's own signmessage RPC (see signing.py) -
-    # there's no separate setting for that, it's simply unavailable without
-    # a funding source. Only the credential for the chosen backend is
+    # that melt them, and to sign notes for LUD-25's mandatory Offline
+    # verification via the node's own signmessage RPC (see signing.py).
+    # A mutation fails before burning anything if this signer is unavailable.
+    # Only the credential for the chosen backend is
     # required (macaroon for lnd, rune for cln, mnemonic for spark); the
     # others are ignored.
     fundingsource_backend: Literal["lnd", "cln", "spark"] | None = None
@@ -57,6 +58,14 @@ class Settings(BaseSettings):
     fundingsource_spark_storage_dir: str | None = None
     fundingsource_spark_sync_interval_secs: int = Field(default=15, ge=1)
     fundingsource_spark_account_number: int | None = None
+
+    # Comma-separated, compressed secp256k1 public keys this SERVICE used
+    # before a deliberate signing-key rotation. Public only: old private
+    # keys are not needed to verify notes already in circulation and should
+    # not be retained. The current key is rejected at response time because
+    # lnd/cln identity discovery is asynchronous and cannot run in Settings
+    # validation. Empty by default because most mints have never rotated.
+    mint_previous_pubkeys: str | None = None
     # how often (seconds) to re-probe the funding source in the background
     # after boot, once a backend is configured - the one-shot check at
     # startup (see server.py's lifespan) only catches a connection problem
@@ -183,6 +192,21 @@ class Settings(BaseSettings):
             raise ValueError(f"ONION_URL {value!r} has no hostname.")
         return value
 
+    @field_validator("mint_previous_pubkeys")
+    @classmethod
+    def _previous_pubkeys_are_compressed_secp256k1(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        keys = [key.strip().lower() for key in value.split(",") if key.strip()]
+        if not keys:
+            return None
+        invalid = next((key for key in keys if not re.fullmatch(r"0[23][0-9a-f]{64}", key)), None)
+        if invalid is not None:
+            raise ValueError(f"MINT_PREVIOUS_PUBKEYS contains an invalid compressed secp256k1 key: {invalid!r}.")
+        if len(set(keys)) != len(keys):
+            raise ValueError("MINT_PREVIOUS_PUBKEYS contains a duplicate key.")
+        return ",".join(keys)
+
     @model_validator(mode="after")
     def _sendable_bounds_are_ordered(self) -> "Settings":
         """min_sendable_msat <= max_sendable_msat - inverted bounds would
@@ -226,6 +250,9 @@ class Settings(BaseSettings):
             spark_sync_interval_secs=self.fundingsource_spark_sync_interval_secs,
             spark_account_number=self.fundingsource_spark_account_number,
         )
+
+    def previous_mint_pubkeys(self) -> list[str]:
+        return self.mint_previous_pubkeys.split(",") if self.mint_previous_pubkeys else []
 
 
 settings = Settings()

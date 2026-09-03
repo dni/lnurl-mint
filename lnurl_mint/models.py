@@ -81,9 +81,9 @@ class LnurlWithdrawResponse(BaseModel):
     LnurlErrorResponseHandler's response_model_exclude_none) rather than
     sent as null, exactly the shape the spec says to use.
 
-    `mintPubkey` (LUD-25 Offline verification, optional) is this mint's
-    signing key - omitted entirely if no funding source is configured
-    (see signing.mint_pubkey)."""
+    `mintPubkey` is this SERVICE's mandatory LUD-25 signing key.
+    `previousPubkeys` keeps earlier public keys available after a deliberate
+    rotation, so notes already in circulation remain verifiable."""
 
     tag: Literal["withdrawRequest"] = "withdrawRequest"
     callback: str
@@ -91,7 +91,8 @@ class LnurlWithdrawResponse(BaseModel):
     minWithdrawable: int
     maxWithdrawable: int
     defaultDescription: str = ""
-    mintPubkey: str | None = None
+    mintPubkey: str
+    previousPubkeys: list[str] | None = None
 
 
 class LnurlMintAddressResponse(BaseModel):
@@ -117,6 +118,7 @@ class LnurlMintAddressResponse(BaseModel):
     maxWithdrawable: int
     defaultDescription: str = ""
     mintPubkey: str | None = None
+    previousPubkeys: list[str] | None = None
     payLink: str
     nodeAlias: str | None = None
     nodeUri: str | None = None
@@ -155,9 +157,10 @@ class WithdrawSuccessResponse(BaseModel):
     semantics). `pr`/`verify` echo a melt's invoice and its LUD-21-style
     settlement-proof URL, present only when VERIFY_ENABLED. `sig`/`sig2`
     are this mint's Offline-verification signatures over a rotate/split/
-    merge's `h`/`h2` (see signing.sign_note) - `sig2` only for a split,
-    both omitted if no funding source is configured. None fields are
-    excluded on the wire."""
+    merge's `h`/`h2` (see signing.sign_note). Every successful mutation
+    which creates a note carries `sig`; `sig2` is present for a split.
+    None fields are excluded on the wire so melts retain ordinary LUD-03
+    success shape."""
 
     status: Literal["OK"] = "OK"
     sig: str | None = None

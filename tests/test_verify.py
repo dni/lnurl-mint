@@ -265,6 +265,23 @@ def test_melts_table_migrates_from_before_mark_melt_settled(tmp_path):
     assert store.melt_settled("deadbeef") is True
 
 
+def test_burns_table_migrates_to_persist_replayed_signatures(tmp_path):
+    db_path = str(tmp_path / "pre-signature-replay.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE burns (burn_key TEXT PRIMARY KEY, h TEXT NOT NULL, h2 TEXT, "
+        "amount1_msat INTEGER NOT NULL, amount2_msat INTEGER)"
+    )
+    conn.execute("INSERT INTO burns VALUES ('old-note', 'new-note', NULL, 2000, NULL)")
+    conn.commit()
+    conn.close()
+
+    store = NoteStore(db_path)
+    assert store.find_burn(["old-note"]) == ("new-note", None, 2000, None, None, None)
+    assert store.remember_burn_signatures(["old-note"], "signature", None) == ("signature", None)
+    assert store.find_burn(["old-note"]) == ("new-note", None, 2000, None, "signature", None)
+
+
 def test_outstanding_msat_is_zero_for_a_fresh_store(tmp_path):
     store = NoteStore(str(tmp_path / "notes.db"))
     assert store.outstanding_msat() == 0

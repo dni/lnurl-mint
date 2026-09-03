@@ -59,8 +59,8 @@ note's secret, a fresh random preimage, and discloses only its sha256 hash as
 `h` (and, for a split's change note, `h2`). This mint registers the new note
 under that hash directly and never sees, generates, or persists the underlying
 preimage - the callback response for these carries no secret at all, just
-`{"status": "OK"}` (plus `sig`/`sig2` if offline verification is configured,
-see below). `h` is required whenever `pr` is absent; `h2` is additionally
+`{"status": "OK", "sig": ...}` (plus `sig2` for a split, see below). `h` is
+required whenever `pr` is absent; `h2` is additionally
 required whenever `amount` is too. A missing or malformed one fails with
 `{"status": "ERROR", "reason": "missing h"}` (or `"missing h2"`) rather than
 this mint generating a secret on `WALLET`'s behalf.
@@ -111,8 +111,8 @@ left alone - none of them increases this mint's outstanding liability, and
 holders still need to be able to consolidate and redeem what they already
 have. Off by default.
 
-**Offline verification** (optional): if a funding source is configured, `GET
-/w` advertises a `mintPubkey` - that node's own identity, the same key
+**Offline verification**: `GET /w` advertises a stable `mintPubkey` controlled
+by this SERVICE. For lnd and cln this is the node's own identity, the same key
 it signs BOLT-11 invoices with - and rotate/split/merge responses carry a
 recoverable `sig`/`sig2` over each new note's hash (`h`/`h2`, supplied by
 `WALLET` - this mint signs exactly what it was given, never a secret it
@@ -131,11 +131,22 @@ only *recommends* the node-id key - `mintPubkey` may be any secp256k1 key,
 and a spark wallet's invoices are signed by its SSP anyway - so wallets
 verify spark-minted notes exactly like lnd/cln ones (see
 `spark._lud25_signing_key`; the derivation is cross-checked against
-`@scure/bip32` in the test suite). Rotating the mnemonic rotates the key.
-There's no separate setting for this: without a funding
-source, both fields are simply omitted, same as any other unconfigured
-optional field, and signing failures (e.g. a briefly unreachable node) are
-swallowed rather than failing the rotate/split/merge itself.
+`@scure/bip32` in the test suite). It therefore survives restarts without a
+second secret to back up.
+
+Changing the funding-node identity or Spark mnemonic rotates the signing key.
+Before doing that deliberately, set `MINT_PREVIOUS_PUBKEYS` to the
+comma-separated compressed public keys this SERVICE used before. They remain
+published in `previousPubkeys`, so old notes can still be verified. This
+history does not authorise the new key: wallets pin keys to the SERVICE origin
+and require holder approval or another authenticated continuity proof before
+accepting a replacement.
+
+Offline verification is a SERVICE requirement. With no configured funding
+source, or while signing is unavailable, a note lookup or mutation returns an
+error. Rotate/split/merge signs every output before entering the atomic swap,
+so a signing failure leaves all inputs outstanding. The exact signatures are
+stored with a completed burn and replayed without contacting the signer again.
 
 **Verify** (optional, [LUD-21](../luds/21.md)): set `VERIFY_ENABLED=true` to
 serve `/verify/{payment_hash}` and advertise a `verify` URL in `/p/cb`'s
@@ -307,12 +318,10 @@ Set `FUNDINGSOURCE_MACAROON` to the hex-encoded contents of that file
 (`xxd -p -c1000 lnurl-mint.macaroon`, or drop `--save_to` to have `lncli`
 print the hex directly instead of writing a file). `message:write` is the
 one easy to leave out and the one that breaks quietly: without it,
-`SignMessage` calls fail, and since offline verification (LUD-25) is
-optional and never blocks a rotate/split/merge on failure (see
-`signing.sign_note`), a scoped-too-narrow macaroon shows up as every note
-silently missing its signature rather than an obvious error - check the
-logs for `sign_note: could not sign via lnd funding source: ...` if that
-happens.
+`SignMessage` calls fail. Since LUD-25 requires the signature, the mutation
+then fails before burning any input note. Check the logs for
+`sign_note: could not sign via lnd funding source: ...` and correct the
+macaroon before accepting traffic.
 
 ### Spark funding source
 
