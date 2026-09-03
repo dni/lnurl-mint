@@ -147,18 +147,19 @@ def test_spark_storage_dir_defaults_next_to_the_database(monkeypatch: pytest.Mon
     assert not config.spark_storage_dir.startswith("/var")
 
 
-def test_offline_verification_is_omitted_for_spark(monkeypatch: pytest.MonkeyPatch):
-    # LUD-25 fixes the note-signature digest as the "Lightning Signed
-    # Message" double-sha256 construction; the spark SDK signs a
-    # single-sha256 digest with no raw-digest API, so this backend must
-    # not emit signatures or advertise a mintPubkey at all - both fields
-    # are optional per spec, and advertising either would point wallets
-    # at a verification that always fails
-    from lnurl_mint.signing import mint_pubkey
+def test_offline_verification_signs_with_the_seed_derived_key():
+    # LUD-25 fixes the digest; the spark SDK cannot produce it, so the
+    # backend signs it locally with a dedicated seed-derived key instead -
+    # spec-conformant (mintPubkey may be any secp256k1 key), same wire
+    # format as lnd/cln, verifiable by the standard helper
+    from lnurl_mint.signing import mint_pubkey, verify_note
+    from lnurl_mint.spark import signing_pubkey_hex
 
-    with pytest.raises(ValueError, match="offline verification"):
-        _run(spark_module._sign_message_spark("LNURLcash:5000:" + "ab" * 32, SPARK_CONFIG))
-    assert _run(mint_pubkey(SPARK_CONFIG)) is None
+    message = "LNURLcash:5000:" + "ab" * 32
+    r_s, recovery_id = _run(spark_module._sign_message_spark(message, SPARK_CONFIG))
+    signature = (r_s + bytes([recovery_id])).hex()
+    assert verify_note(signing_pubkey_hex(SPARK_CONFIG), "ab" * 32, 5000, signature)
+    assert _run(mint_pubkey(SPARK_CONFIG)) == signing_pubkey_hex(SPARK_CONFIG)
 
 
 def test_mint_address_discovery_omits_mint_pubkey_for_spark(client: TestClient, monkeypatch: pytest.MonkeyPatch):

@@ -15,3 +15,4 @@ lnurl_mint/static/swagger-ui.css
 # credential, never committed (scripts/spark_mainnet_check.py reads it by
 # default; move or rename it freely and pass --api-key-file instead)
 breez-api.key
+.spark-e2e/

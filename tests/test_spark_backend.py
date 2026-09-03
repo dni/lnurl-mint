@@ -21,7 +21,8 @@ breez = pytest.importorskip("breez_sdk_spark")
 import lnurl_mint.node as node_module  # noqa: E402
 import lnurl_mint.spark as spark_module  # noqa: E402
 from lnurl_mint.node import LightningBackendConfig, PaymentFailed  # noqa: E402
-from lnurl_mint.signing import mint_pubkey, sign_note  # noqa: E402
+from lnurl_mint.signing import mint_pubkey, sign_note, verify_note  # noqa: E402
+from lnurl_mint.spark import signing_pubkey_hex  # noqa: E402
 from tests.conftest import fake_invoice  # noqa: E402
 
 SPARK_CONFIG = LightningBackendConfig(
@@ -531,33 +532,55 @@ def test_payment_preimage_for_melt_verify(spark_sdk):
     assert _run(node_module.payment_preimage(hash_, SPARK_CONFIG)) == bytes.fromhex("34" * 32)
 
 
-def test_sign_message_refuses_rather_than_emit_a_nonstandard_digest(spark_sdk, caplog):
-    # LUD-25 fixes the digest as the "Lightning Signed Message"
-    # double-sha256 construction; the spark SDK signs single-sha256 with
-    # no raw-digest API, so the backend refuses outright (before ever
-    # touching the SDK - the fake would assert if it were called) and
-    # the optional sig/mintPubkey fields are omitted downstream rather
-    # than advertising signatures no spec-conformant wallet verifies
+def test_sign_message_produces_spec_signatures_locally(spark_sdk):
+    # LUD-25 signatures via the dedicated seed-derived key: the exact spec
+    # digest (Lightning Signed Message double-sha256) and wire format
+    # (recoverable r||s||recid), RFC6979-deterministic, and produced with
+    # NO sdk call at all - purely local key material, so signing can never
+    # fail for network reasons mid-rotate/split/merge (the fake's
+    # sign_message would assert if the backend tried the SDK's)
     message = "LNURLcash:5000:" + "ab" * 32
-    with pytest.raises(ValueError, match="offline verification"):
-        _run(node_module.sign_message(message, SPARK_CONFIG))
-    assert spark_sdk.sync_wallet_calls == 0
+    assert spark_sdk.user_settings_calls == 0 and spark_sdk.sync_wallet_calls == 0
+    r_s, recovery_id = _run(node_module.sign_message(message, SPARK_CONFIG))
+    assert spark_sdk.user_settings_calls == 0 and spark_sdk.sync_wallet_calls == 0
+    from lnurl_mint.signing import verify_note
 
-    # sign_note swallows exactly that refusal and answers None, logging
-    # why so an operator isn't left wondering why sigs never appear
-    import logging
+    pubkey = signing_pubkey_hex(SPARK_CONFIG)
+    signature = (r_s + bytes([recovery_id])).hex()
+    assert verify_note(pubkey, "ab" * 32, 5000, signature)
 
-    with caplog.at_level(logging.WARNING):
-        assert _run(sign_note("ab" * 32, 5000, SPARK_CONFIG)) is None
-    assert any("could not sign via spark" in r.message for r in caplog.records)
+    # RFC6979: deterministic nonces - the same message always signs identically
+    again = _run(node_module.sign_message(message, SPARK_CONFIG))
+    assert (again[0] + bytes([again[1]])) == r_s + bytes([recovery_id])
 
 
-def test_mint_pubkey_is_not_advertised_for_spark(spark_sdk):
-    # same policy from the other end: mint_pubkey omits the key entirely
-    # for spark (signatures are unavailable, so advertising the key would
-    # point wallets at a verification that always fails) even though the
-    # wallet identity itself is perfectly reachable
-    assert _run(mint_pubkey(SPARK_CONFIG)) is None
+def test_signing_key_is_derived_from_the_mnemonic():
+    # deterministic derivation: same mnemonic -> same key forever, a
+    # different mnemonic -> a different key (rotating the wallet rotates
+    # the advertised mintPubkey and with it every future signature)
+    other = LightningBackendConfig(
+        backend="spark",
+        spark_mnemonic="legal winner thank year wave sausage worth useful legal winner thank yellow",
+        spark_storage_dir="/nonexistent",
+    )
+    a = signing_pubkey_hex(SPARK_CONFIG)
+    assert a == signing_pubkey_hex(SPARK_CONFIG)
+    b = signing_pubkey_hex(other)
+    assert a != b
+    assert len(bytes.fromhex(a)) == 33  # compressed secp256k1 pubkey
+
+
+def test_sign_note_end_to_end_against_verify_note(spark_sdk):
+    h = urandom(32).hex()
+    signature = _run(sign_note(h, 5000, SPARK_CONFIG))
+    assert signature is not None
+    assert verify_note(signing_pubkey_hex(SPARK_CONFIG), h, 5000, signature)
+
+
+def test_mint_pubkey_advertises_the_derived_key(spark_sdk):
+    # mint_pubkey serves the same dedicated key the notes are signed with,
+    # derived locally - no funding-source round trip involved for spark
+    assert _run(mint_pubkey(SPARK_CONFIG)) == signing_pubkey_hex(SPARK_CONFIG)
 
 
 def test_fetch_node_info_probes_both_legs_and_reports_identity_not_balance(spark_sdk):

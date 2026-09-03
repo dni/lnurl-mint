@@ -12,7 +12,7 @@ node.py contract is implemented on top of five SDK calls:
                       is_payment_complete is only believed after a forced
                       sync bracketed by two-leg remote probes)
 - is_invoice_settled -> list_payments (same scan, receive side)
-- sign_message     -> refused (see "LUD-25 offline verification" below)
+- sign_message     -> signed locally (LUD-25 digest, seed-derived key)
 - fetch_node_info  -> _remote_probe (coordinator + SSP) + get_info
 
 Two deviations from the lnd/cln backends are load-bearing:
@@ -33,18 +33,18 @@ the spec) - it is only ever materialized live from the SDK's storage
 after settlement (see _invoice_preimage_spark), exactly like lnd's
 LookupInvoice echo, and served through LUD-21 verify.
 
-**LUD-25 offline verification is unavailable, not adapted.** The spec
-fixes a note signature's digest as the "Lightning Signed Message"
-construction - sha256(sha256(b"Lightning Signed Message:" + message)) -
-which lnd's and cln's signmessage RPCs produce natively. The spark SDK's
-sign_message signs ECDSA over plain single sha256(message) instead, with
-no way to sign an arbitrary digest, and the wire response carries no
-scheme field a wallet could use to tell the two apart - so a spark
-signature would fail every spec-conformant verification. Rather than
-advertise signatures no wallet accepts, _sign_message_spark raises and
-signing.mint_pubkey/sign_note omit mintPubkey/sig for this backend
-entirely (both optional per spec), same as when signing fails for lnd/
-cln.
+**LUD-25 offline verification signs with a dedicated seed-derived key.**
+The spec's digest is the "Lightning Signed Message" construction -
+sha256(sha256(b"Lightning Signed Message:" + message)) - which lnd's and
+cln's signmessage RPCs produce natively. The spark SDK has no signmessage
+and its own sign_message signs a single-sha256 digest it cannot redirect,
+so this backend derives a dedicated key from the wallet's own seed
+(m/25'/0'/0', outside spark's m/8797555' key tree) and signs the exact
+spec digest locally (RFC6979, recoverable r||s||recid). LUD-25 only
+RECOMMENDS the node-id key - mintPubkey may be any secp256k1 key, and a
+spark wallet's invoices are signed by its SSP anyway - so wallets verify
+spark-minted notes exactly like lnd/cln ones: recover the key from
+(digest, sig), compare to the advertised mintPubkey.
 
 **The SDK is a process-wide singleton** built once (see _sdk), not a
 per-call REST client like lnd/cln: it owns a sqlite store of its own (its
@@ -95,15 +95,20 @@ to msat on the way out.
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import unicodedata
 import uuid
 from collections import OrderedDict
 from hashlib import sha256
 from typing import Any, Callable
 
 import bolt11
+from coincurve import PrivateKey
 
 from .node import LightningBackendConfig, NodeInfo, PaymentFailed, PaymentResult
+from .signing import lightning_signed_message_digest
 
 try:  # optional dependency - see the module docstring and pyproject's
     # [project.optional-dependencies] spark extra
@@ -594,21 +599,94 @@ async def _payment_preimage_spark(payment_hash: str, config: LightningBackendCon
     return None
 
 
+# --- LUD-25 offline verification: a dedicated seed-derived signing key -----
+#
+# The spec's digest (the "Lightning Signed Message" double-sha256 wrap,
+# see signing.lightning_signed_message_digest) is produced natively by
+# lnd/cln signmessage; the spark SDK has no signmessage and its own
+# sign_message signs a single-sha256 digest it cannot redirect. LUD-25
+# only RECOMMENDS the node-id key, though - mintPubkey may be any
+# secp256k1 key - so this backend derives a dedicated one from the
+# wallet's own seed and signs the exact spec digest locally (coincurve /
+# libsecp256k1, RFC6979 deterministic nonces, recoverable r||s||recid):
+# identical wire behavior to lnd/cln notes, verified by wallets the same
+# way - recover the key from (digest, sig), compare to mintPubkey.
+#
+# Path: m/25'/0'/0' - purpose 25 (LUD-25), fully hardened. Deliberately
+# OUTSIDE spark's own key tree (everything spark derives lives under
+# m/8797555'/{account}', per the signer's account_master_key), so it can
+# never collide with the wallet identity, leaf signing, or deposit keys;
+# and distinct from holder-side LUD-25 derivations (m/139' under the
+# *user's* master) - this is the MINT's seed. Rotating the mnemonic
+# rotates the key.
+_LUD25_SIGNING_PATH = (25 + 0x80000000, 0 + 0x80000000, 0 + 0x80000000)
+
+# secp256k1 group order, for BIP32 child-key arithmetic
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+# cache: mnemonic -> (PrivateKey, pubkey hex), so the per-request sign
+# paths (every rotate/split/merge, every /w GET) never re-derive
+_signing_keys: dict[str, tuple[PrivateKey, str]] = {}
+
+
+def _bip39_seed(mnemonic: str) -> bytes:
+    """BIP39 mnemonic -> 64-byte seed (PBKDF2-HMAC-SHA512, 2048 rounds,
+    salt 'mnemonic'), stdlib-only - the same derivation the SDK applies to
+    Seed.MNEMONIC (Seed::to_bytes), so the key really does belong to the
+    configured wallet."""
+    password = unicodedata.normalize("NFKD", mnemonic).encode()
+    salt = unicodedata.normalize("NFKD", "mnemonic").encode()
+    return hashlib.pbkdf2_hmac("sha512", password, salt, 2048, dklen=64)
+
+
+def _bip32_hardened_child(key: bytes, chain_code: bytes, index: int) -> tuple[bytes, bytes]:
+    """One BIP32 hardened child step: I = HMAC-SHA512(chain, 0x00 || key
+    || ser32(index)); child key = (key + I[:32]) mod n, child chain =
+    I[32:]. (Non-hardened derivation needs the parent PUBLIC key in the
+    HMAC input; an all-hardened path never does, so this is all we need.)"""
+    digest = hmac.new(chain_code, b"\x00" + key + index.to_bytes(4, "big"), hashlib.sha512).digest()
+    tweak = int.from_bytes(digest[:32], "big")
+    child = (int.from_bytes(key, "big") + tweak) % _SECP256K1_N
+    if tweak >= _SECP256K1_N or child == 0:  # BIP32 invalid child, ~2^-127
+        raise ValueError("invalid BIP32 child (improbable index)")
+    return child.to_bytes(32, "big"), digest[32:]
+
+
+def _lud25_signing_key(config: LightningBackendConfig) -> tuple[PrivateKey, str]:
+    """(private key, compressed pubkey hex) of the wallet's LUD-25 note-
+    signing key, derived and cached per mnemonic. Purely local: no SDK,
+    no network, deterministic - same mnemonic, same key, forever."""
+    if not config.spark_mnemonic:
+        raise ValueError("Mnemonic is required.")
+    mnemonic = config.spark_mnemonic.get_secret_value().strip()
+    cached = _signing_keys.get(mnemonic)
+    if cached is not None:
+        return cached
+    # BIP32 master: I = HMAC-SHA512(key=b"Bitcoin seed", data=seed)
+    master = hmac.new(b"Bitcoin seed", _bip39_seed(mnemonic), hashlib.sha512).digest()
+    key, chain_code = master[:32], master[32:]
+    for index in _LUD25_SIGNING_PATH:
+        key, chain_code = _bip32_hardened_child(key, chain_code, index)
+    private_key = PrivateKey(key)
+    result = (private_key, private_key.public_key.format(compressed=True).hex())
+    _signing_keys[mnemonic] = result
+    return result
+
+
+def signing_pubkey_hex(config: LightningBackendConfig) -> str:
+    """This spark wallet's LUD-25 mintPubkey (see _lud25_signing_key) - what
+    mint_pubkey and the mint-address discovery endpoint advertise."""
+    return _lud25_signing_key(config)[1]
+
+
 async def _sign_message_spark(message: str, config: LightningBackendConfig) -> tuple[bytes, int]:
-    # LUD-25 fixes the note-signature digest as the "Lightning Signed
-    # Message" construction (double sha256 over a prefixed message) - see
-    # the module docstring. The spark SDK's sign_message signs single
-    # sha256(message) with the wallet identity key and offers no way to
-    # sign an arbitrary digest, so this backend cannot produce a
-    # signature any spec-conformant wallet will verify. Raise rather than
-    # emit one: signing.sign_note/mint_pubkey catch this and omit the
-    # (optional) sig/mintPubkey fields entirely instead of advertising
-    # offline verification that can never succeed.
-    raise ValueError(
-        "The spark backend cannot produce LUD-25 note signatures - "
-        "its SDK signs a single-sha256 digest with no raw-digest API, so offline "
-        "verification is unavailable for spark-funded mints."
-    )
+    # the exact LUD-25 digest and wire format lnd/cln produce via their
+    # signmessage RPC, signed locally with the dedicated seed-derived key
+    # (RFC6979 deterministic nonces via libsecp256k1) - see the signing-key
+    # block above for why a self-generated key rather than the SDK's
+    private_key, _ = _lud25_signing_key(config)
+    recoverable = private_key.sign_recoverable(lightning_signed_message_digest(message), hasher=None)
+    return recoverable[:64], recoverable[64]
 
 
 async def _is_invoice_settled_spark(payment_hash: str, config: LightningBackendConfig) -> bool:

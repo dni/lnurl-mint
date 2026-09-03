@@ -31,7 +31,6 @@ import asyncio
 import os
 import sys
 import tempfile
-from hashlib import sha256
 from os import urandom
 
 import bolt11
@@ -183,7 +182,13 @@ async def main() -> int:
     storage = args.storage or tempfile.mkdtemp(prefix="spark-mainnet-check-")
     ephemeral = args.mnemonic is None
     print(f"building spark wallet (mainnet, {'ephemeral seed' if ephemeral else 'persistent seed'}, {storage}) ...")
-    seed = Seed.MNEMONIC(mnemonic=args.mnemonic, passphrase=None) if args.mnemonic else Seed.ENTROPY(urandom(32))
+    # an unfunded throwaway mnemonic for ephemeral runs (raw entropy would
+    # work for the wallet, but the LUD-25 signing key derives from the
+    # mnemonic - BIP39 and raw entropy are NOT interchangeable seeds)
+    mnemonic = (
+        args.mnemonic or "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    )
+    seed = Seed.MNEMONIC(mnemonic=mnemonic, passphrase=None)
     sdk = await build_sdk(api_key, seed, storage)
     # the backend's own functions read the process-wide singleton - the
     # test hook swaps in this wallet, exactly what the unit suite's fakes do
@@ -191,7 +196,7 @@ async def main() -> int:
 
     # a stand-in config: only backend/spark fields are read once the
     # singleton exists (the wallet was built explicitly above)
-    backend_config = LightningBackendConfig(backend="spark", spark_storage_dir=storage)
+    backend_config = LightningBackendConfig(backend="spark", spark_mnemonic=mnemonic, spark_storage_dir=storage)
     try:
         print("\nnode info / identity:")
         info = await fetch_node_info(backend_config)
@@ -224,20 +229,26 @@ async def main() -> int:
             check("unknown payment stays indeterminate (raises, never False)", True, str(exc)[:50])
         check("unknown payment has no preimage", (await payment_preimage(unknown, backend_config)) is None)
 
-        print("\noffline verification (LUD-25) - deliberately unavailable for spark:")
+        print("\noffline verification (LUD-25, seed-derived key):")
+        # the SDK cannot produce the spec's Lightning-Signed-Message digest,
+        # so the backend signs it locally with a dedicated key derived from
+        # the wallet's seed (m/25'/0'/0') - spec-conformant: mintPubkey may
+        # be any secp256k1 key, and wallets verify identically to lnd/cln
         h = urandom(32).hex()
-        # the spark SDK signs a single-sha256 digest LUD-25's fixed
-        # "Lightning Signed Message" construction doesn't match, so the
-        # backend refuses to sign at all and the optional fields are
-        # omitted rather than advertising unverifiable signatures (see
-        # spark._sign_message_spark)
-        try:
-            await sign_message(f"LNURLcash:{amount_msat}:{h}", backend_config)
-            check("sign_message refused", False, "signed - would advertise an unverifiable digest")
-        except ValueError as exc:
-            check("sign_message refused", "offline verification" in str(exc), str(exc)[:60])
-        check("sign_note omits the signature", (await sign_note(h, amount_msat, backend_config)) is None)
-        check("mint_pubkey omits the key", (await mint_pubkey(backend_config)) is None)
+        r_s, recovery_id = await sign_message(f"LNURLcash:{amount_msat}:{h}", backend_config)
+        signature = (r_s + bytes([recovery_id])).hex()
+        pubkey = await mint_pubkey(backend_config)
+        from lnurl_mint.signing import verify_note
+
+        check(
+            "sign_message produces a spec-verifiable signature",
+            pubkey is not None and verify_note(pubkey, h, amount_msat, signature),
+        )
+        check("sign_note signs with the same key", (await sign_note(h, amount_msat, backend_config)) == signature)
+        check(
+            "mint_pubkey is the dedicated derived key (not the wallet identity)",
+            pubkey is not None and pubkey != info.uri,
+        )
 
         print("\nfundable addresses (for a full round trip later):")
         spark_address = (

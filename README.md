@@ -122,11 +122,16 @@ contacting the mint (see `signing.py`). Notes are signed via the funding source'
 with the standard "Lightning Signed Message:" prefix and double-sha256 it
 before signing - the same convention other Lightning tooling already uses to
 prove node ownership, rather than a bespoke raw-digest scheme neither backend
-can actually produce. The spark backend cannot participate at all: its SDK
-signs a single-sha256 digest with no raw-digest API, so it cannot produce
-the digest LUD-25 fixes - rather than advertise signatures (or a
-`mintPubkey`) no spec-conformant wallet would ever verify, spark-funded
-mints simply omit both optional fields (see `spark._sign_message_spark`).
+can actually produce. The spark backend can't reuse that path either: its
+SDK has no signmessage and signs a single-sha256 digest it cannot redirect
+- so instead it derives a **dedicated signing key from the wallet's own
+seed** (`m/25'/0'/0'`, outside spark's own `m/8797555'` key tree) and signs
+the exact LUD-25 digest locally (RFC6979, recoverable `r||s||recid`). LUD-25
+only *recommends* the node-id key - `mintPubkey` may be any secp256k1 key,
+and a spark wallet's invoices are signed by its SSP anyway - so wallets
+verify spark-minted notes exactly like lnd/cln ones (see
+`spark._lud25_signing_key`; the derivation is cross-checked against
+`@scure/bip32` in the test suite). Rotating the mnemonic rotates the key.
 There's no separate setting for this: without a funding
 source, both fields are simply omitted, same as any other unconfigured
 optional field, and signing failures (e.g. a briefly unreachable node) are
@@ -347,7 +352,10 @@ docstring):
   proof-of-payment (never the note's secret), and LUD-21 verify fetches
   it live from the SDK after settlement - the
   store-hashes-not-secrets policy holds either way, just more literally.
-- **LUD-25 offline verification is unavailable** - see above.
+- **LUD-25 offline verification via a dedicated seed-derived key** - see
+  above: full spec-conformant signatures (same digest, same wire format,
+  verified by wallets identically to lnd/cln notes), signed locally
+  rather than via the SDK.
 - **Melt payments always take the Lightning route** (never a spark-routed
   shortcut) and are idempotent per invoice payment hash, and a melt whose
   SSP quote exceeds the fee budget is rejected before anything is paid.

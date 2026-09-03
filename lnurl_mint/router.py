@@ -564,15 +564,17 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
             node_num_peers = info.num_peers
             # same derivation as signing.mint_pubkey - reused directly
             # rather than calling that function, which would fetch_node_info
-            # a second time for the exact same round trip. spark excluded
-            # here for the same reason mint_pubkey excludes it (see its
-            # docstring): it cannot sign a note any spec-conformant wallet
-            # would verify, so advertising the key just points wallets at a
-            # verification that always fails - offline verification is
-            # honestly absent instead
-            mint_pubkey_value = (
-                None if funding_source.backend == "spark" else info.uri.split("@")[0] if info.uri else None
-            )
+            # a second time for the exact same round trip. spark advertises
+            # its dedicated seed-derived LUD-25 key rather than the node
+            # identity: that's the key its notes are actually signed with
+            # (see spark._lud25_signing_key), and it derives purely locally,
+            # so it costs no extra network round trip either
+            if funding_source.backend == "spark":
+                from .spark import signing_pubkey_hex
+
+                mint_pubkey_value = signing_pubkey_hex(funding_source)
+            else:
+                mint_pubkey_value = info.uri.split("@")[0] if info.uri else None
         except Exception as exc:
             logging.warning("mint address: could not reach %s funding source: %s", funding_source.backend, exc)
     return LnurlMintAddressResponse(
