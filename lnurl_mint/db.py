@@ -228,6 +228,17 @@ class NoteStore:
         row = self.conn.execute("SELECT amount_msat FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
         return row[0] if row else None
 
+    def outstanding_notes(self) -> tuple[int, int]:
+        """(count, total amount_msat) of every currently outstanding bearer
+        note - this mint's total liability, for the transparency fields on
+        the mint-address discovery endpoint (router._mint_address_response)
+        and the frontend one-pager. Includes notes reserved by an in-flight
+        melt (pending = 1): mark_pending only reserves a note, it doesn't
+        burn it (see its own docstring) - it's still outstanding, per LUD-25,
+        until its melt actually settles."""
+        row = self.conn.execute("SELECT COUNT(*), COALESCE(SUM(amount_msat), 0) FROM notes WHERE spent = 0").fetchone()
+        return (row[0], row[1])
+
     def note_spent(self, note_id: str) -> bool:
         """Whether `note_id` names a note this mint actually issued and has
         since burned - as opposed to one that never existed at all. Burned

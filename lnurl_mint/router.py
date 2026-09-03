@@ -564,6 +564,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
             mint_pubkey_value = info.uri.split("@")[0] if info.uri else None
         except Exception as exc:
             logging.warning("mint address: could not reach %s funding source: %s", funding_source.backend, exc)
+    outstanding_count, outstanding_msat = notes.outstanding_notes()
     return LnurlMintAddressResponse(
         callback=f"{base}/w",
         minWithdrawable=settings.min_mint_msat,
@@ -579,6 +580,8 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
         nodeNumChannels=node_num_channels,
         nodeNumPeers=node_num_peers,
         sunsetDate=settings.sunset_date.isoformat() if settings.sunset_date else None,
+        outstandingNotesCount=outstanding_count,
+        outstandingNotesMsat=outstanding_msat,
     )
 
 
