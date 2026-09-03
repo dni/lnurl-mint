@@ -4,6 +4,7 @@ from bech32 import bech32_decode, convertbits
 from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
+from lnurl_mint.db import notes
 from lnurl_mint.frontend import lnurl_encode
 
 ONION = "http://abcdefghijklmnop1234567890abcdefghijklmnop1234567890abcdefgh.onion"
@@ -180,6 +181,34 @@ def test_mint_address_reports_the_configured_sunset_date(client: TestClient, nod
 def test_mint_address_omits_sunset_date_when_unset(client: TestClient, node):
     data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
     assert "sunsetDate" not in data
+
+
+def test_mint_address_reports_outstanding_msat(client: TestClient, monkeypatch):
+    # NoteStore.outstanding_msat's own correctness (materialization,
+    # rotate/melt bookkeeping) has its own tests in test_verify.py against
+    # an isolated NoteStore - this only checks the endpoint echoes it
+    # verbatim, without depending on the test session's shared database
+    monkeypatch.setattr(notes, "outstanding_msat", lambda: 123_000)
+    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
+    assert data["outstandingNotesMsat"] == 123_000
+
+
+def test_index_shows_outstanding_value(client: TestClient, monkeypatch):
+    monkeypatch.setattr(notes, "outstanding_msat", lambda: 2000)
+    response = client.get("/")
+    assert "Outstanding notes" in response.text
+    assert "2 sats" in response.text
+
+
+def test_index_shows_outstanding_value_even_while_sunsetting(client: TestClient, monkeypatch):
+    # unlike the Mint table (hidden while sunsetting, since there's nothing
+    # left to mint), a sunsetting mint still owes every outstanding note -
+    # that's exactly when a holder most wants to see this number
+    monkeypatch.setattr(notes, "outstanding_msat", lambda: 2000)
+    monkeypatch.setattr(settings, "sunset_mint", True)
+    response = client.get("/")
+    assert "Outstanding notes" in response.text
+    assert "2 sats" in response.text
 
 
 def test_index_shows_capacity_and_mint_limits(client: TestClient, node):

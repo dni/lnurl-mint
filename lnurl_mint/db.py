@@ -228,6 +228,26 @@ class NoteStore:
         row = self.conn.execute("SELECT amount_msat FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
         return row[0] if row else None
 
+    def outstanding_msat(self) -> int:
+        """Total value (msat) of every currently outstanding bearer note -
+        this mint's total liability, for the transparency field on the
+        mint-address discovery endpoint (router._mint_address_response) and
+        the frontend one-pager. Includes notes reserved by an in-flight melt
+        (pending = 1): mark_pending only reserves a note, it doesn't burn it
+        (see its own docstring) - it's still outstanding, per LUD-25, until
+        its melt actually settles.
+
+        Only counts notes already materialized into this table - a freshly
+        paid mint invoice this mint hasn't been asked about yet (GET /w, or
+        a mutating callback) still only exists as a settled row in `mints`
+        (see settle_mint's lazy-materialize-on-first-lookup design, e.g.
+        router._mint_settled): the spec's own minting diagram makes that
+        informational GET optional, so a WALLET is never required to make
+        it happen. This total is therefore a lower bound, same as every
+        other lazily-resolved fact this store reports about a note."""
+        row = self.conn.execute("SELECT COALESCE(SUM(amount_msat), 0) FROM notes WHERE spent = 0").fetchone()
+        return row[0]
+
     def note_spent(self, note_id: str) -> bool:
         """Whether `note_id` names a note this mint actually issued and has
         since burned - as opposed to one that never existed at all. Burned

@@ -607,6 +607,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
         nodeNumChannels=node_num_channels,
         nodeNumPeers=node_num_peers,
         sunsetDate=settings.sunset_date.isoformat() if settings.sunset_date else None,
+        outstandingNotesMsat=notes.outstanding_msat(),
     )
 
 

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from . import __version__
 from .config import settings
+from .db import notes
 from .node import cached_fetch_node_info
 from .router import max_mintable_msat
 
@@ -131,6 +132,8 @@ $theme_color_meta
   $pay_section
   $tor_section
   $mint_section
+  <h2>Outstanding notes</h2>
+  $outstanding_section
   <h2>Node</h2>
   $node_section
   <footer>
@@ -237,6 +240,12 @@ LIMITS_SECTION = Template(
   </table>"""
 )
 
+OUTSTANDING_SECTION = Template(
+    """<table>
+    <tr><td>Total value</td><td class="mono">$value</td></tr>
+  </table>"""
+)
+
 COLOR_ROW = Template(
     """<tr><td>Color</td><td>"""
     """<span class="color-swatch" style="background:$color;color:$text_color">$color</span>"""
@@ -331,6 +340,16 @@ def _limits_section() -> str:
         min_amount=_format_sats(settings.min_mint_msat),
         max_amount=_format_sats(max_mintable_msat()),
     )
+
+
+def _outstanding_section() -> str:
+    """The Outstanding table's HTML: the combined value of every bearer note
+    this mint has issued and never burned (NoteStore.outstanding_msat) -
+    this mint's total liability, straight from its own database. Unlike the
+    Node table below, this needs no funding source and is never hidden
+    while sunsetting: a sunsetting mint still owes every outstanding note,
+    and that's exactly when a holder most wants to see this number."""
+    return OUTSTANDING_SECTION.substitute(value=_format_sats(notes.outstanding_msat()))
 
 
 async def _node_section() -> tuple[str, str | None]:
@@ -438,6 +457,7 @@ async def index(req: Request) -> HTMLResponse:
         tor_section=_tor_section(base),
         theme_color_meta=theme_color_meta,
         mint_section=_mint_section(),
+        outstanding_section=_outstanding_section(),
         node_section=node_section,
         version=html.escape(__version__),
     )
