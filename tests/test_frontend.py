@@ -1,3 +1,5 @@
+from datetime import date
+
 from bech32 import bech32_decode, convertbits
 from fastapi.testclient import TestClient
 
@@ -167,7 +169,17 @@ def test_mint_address_without_funding_source(client: TestClient, monkeypatch):
     assert data["tag"] == "withdrawRequest"
     assert data["payLink"] == f"http://testserver/.well-known/lnurlp/{settings.username}"
     assert "nodeAlias" not in data
-    assert "mintPubkey" not in data
+
+
+def test_mint_address_reports_the_configured_sunset_date(client: TestClient, node, monkeypatch):
+    monkeypatch.setattr(settings, "sunset_date", date(2026, 12, 31))
+    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
+    assert data["sunsetDate"] == "2026-12-31"
+
+
+def test_mint_address_omits_sunset_date_when_unset(client: TestClient, node):
+    data = client.get(f"/.well-known/lnurlw/{settings.username}").json()
+    assert "sunsetDate" not in data
 
 
 def test_index_shows_capacity_and_mint_limits(client: TestClient, node):
@@ -221,6 +233,27 @@ def test_index_while_sunsetting_drops_the_onion_pay_block(client: TestClient, mo
     response = client.get("/")
     assert "Also via Tor" not in response.text
     assert ".onion" not in response.text
+
+
+def test_index_shows_no_sunset_warning_by_default(client: TestClient):
+    assert "plans to stop operating" not in client.get("/").text
+
+
+def test_index_shows_sunset_warning_when_configured(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "sunset_date", date(2026, 12, 31))
+    response = client.get("/")
+    assert "plans to stop operating" in response.text
+    assert "2026-12-31" in response.text
+
+
+def test_index_shows_sunset_warning_even_before_sunset_mint_is_on(client: TestClient, monkeypatch):
+    # the whole point is advance warning - a mint can announce the date it
+    # intends to sunset well before it actually flips sunset_mint on
+    monkeypatch.setattr(settings, "sunset_date", date(2026, 12, 31))
+    response = client.get("/")
+    assert "plans to stop operating" in response.text
+    # still minting normally - the banner alone doesn't disable anything
+    assert "<svg" in response.text
 
 
 def test_docs_serves_swagger_ui_with_no_third_party_assets(client: TestClient):

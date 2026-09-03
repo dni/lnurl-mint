@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -85,6 +86,19 @@ class Settings(BaseSettings):
     # and an operator sunsetting a mint still needs holders to be able to
     # consolidate and redeem their notes. Off by default.
     sunset_mint: bool = False
+
+    # advance warning of a planned shutdown: an ISO-8601 date (e.g.
+    # "2026-12-31") an operator sets to tell holders when this mint intends
+    # to sunset, so they have time to melt or migrate their notes before
+    # that day arrives - rather than only finding out once sunset_mint is
+    # already on and minting has already stopped. Purely informational: it
+    # does not itself disable anything (see sunset_mint above for what
+    # actually does), an operator still flips that separately, whenever
+    # they're ready. Advertised on the mint-address discovery endpoint
+    # (router.get_mint_address/_mint_address_response) and the frontend
+    # one-pager (frontend._sunset_warning). None (the default) shows
+    # nothing - most mints never plan to sunset at all.
+    sunset_date: date | None = None
 
     database_path: str = "mint.db"
 
