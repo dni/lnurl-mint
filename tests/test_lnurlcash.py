@@ -744,12 +744,15 @@ def test_withdraw_by_hash_rejects_an_unknown_hash(client: TestClient):
     assert result == {"status": "ERROR", "reason": "Unknown note."}
 
 
-def test_withdraw_by_hash_reports_already_spent_the_same_way_k1_would(client: TestClient, mint_note):
+def test_withdraw_by_hash_hides_that_a_note_was_already_spent(client: TestClient, mint_note):
     k1 = mint_note(5000)
     note_id = sha256(bytes.fromhex(k1)).hexdigest()
     new_k1, h = fresh_secret()
     assert client.get(f"/w/cb?k1={k1}&h={h}").json()["status"] == "OK"  # rotate, burns k1
-    assert client.get(f"/w?h={note_id}").json() == {"status": "ERROR", "reason": "Note already spent."}
+    # LUD-25 requires an unknown or burned h to receive the same response
+    # as an unknown k1. A direct lookup by the already-disclosed bearer
+    # secret may still distinguish spent from never issued.
+    assert client.get(f"/w?h={note_id}").json() == {"status": "ERROR", "reason": "Unknown note."}
     assert client.get(f"/w?k1={k1}").json() == {"status": "ERROR", "reason": "Note already spent."}
 
 

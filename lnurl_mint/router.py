@@ -809,7 +809,10 @@ async def get_withdraw(
     else:
         assert h is not None
         resolved = await _resolve_note_by_hash(h)
-        already_spent = bool(HEX32_PATTERN.match(h) and notes.note_spent(h))
+        # LUD-25 deliberately makes an unknown and a burned `h`
+        # indistinguishable. Unlike a direct k1 lookup, a hash lookup must
+        # not reveal that this mint once held the note.
+        already_spent = False
 
     if resolved is None:
         if already_spent:
