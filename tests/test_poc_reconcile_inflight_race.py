@@ -40,9 +40,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import lnurl_mint.router as router_module
+import lnurl_mint.signing as signing_module
 from lnurl_mint.config import settings
 from lnurl_mint.db import notes
-from lnurl_mint.node import PaymentResult
+from lnurl_mint.node import NodeInfo, PaymentResult
 from lnurl_mint.server import app
 from tests.conftest import fake_invoice, fresh_secret
 
@@ -104,6 +105,11 @@ def inflight(monkeypatch: pytest.MonkeyPatch) -> InFlightNode:
     monkeypatch.setattr(router_module, "is_payment_complete", node.is_payment_complete)
     # no real backoff in tests - see conftest.py's node fixture
     monkeypatch.setattr(router_module, "_CONFIRMATION_RETRY_DELAYS_SECONDS", ())
+
+    async def fetch_node_info(config):
+        return NodeInfo(uri="02" + "ab" * 32)
+
+    monkeypatch.setattr(signing_module, "fetch_node_info", fetch_node_info)
     return node
 
 

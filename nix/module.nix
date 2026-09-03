@@ -59,15 +59,18 @@ in
           types.enum [
             "lnd"
             "cln"
+            "spark"
           ]
         );
         default = null;
         description = ''
           FUNDINGSOURCE_BACKEND: the Lightning node implementation funding
-          this mint. null leaves minting/melting/offline-verification
-          unavailable (rotate/split/merge still work). The credential goes
-          in environmentFiles (FUNDINGSOURCE_MACAROON / FUNDINGSOURCE_RUNE),
-          never in the nix store - scope it as the README documents.
+          this mint, or the in-process Spark wallet. null leaves minting,
+          melting and note lookup unavailable; rotate/split/merge also fail
+          before burning because LUD-25 signatures are mandatory. Credentials
+          go in environmentFiles (FUNDINGSOURCE_MACAROON,
+          FUNDINGSOURCE_RUNE, or FUNDINGSOURCE_SPARK_MNEMONIC), never in the
+          nix store - scope and protect them as the README documents.
         '';
       };
 
@@ -121,7 +124,8 @@ in
         anything without a dedicated option (verifyEnabled, fundingSource,
         host/port, dataDir). Dedicated options win over a raw key naming
         the same variable. Non-secret values only: secrets
-        (FUNDINGSOURCE_MACAROON, FUNDINGSOURCE_RUNE) belong in
+        (FUNDINGSOURCE_MACAROON, FUNDINGSOURCE_RUNE,
+        FUNDINGSOURCE_SPARK_MNEMONIC, FUNDINGSOURCE_SPARK_API_KEY) belong in
         environmentFiles so they stay out of the world-readable nix store.
       '';
     };
@@ -132,9 +136,9 @@ in
       example = [ "/run/secrets/lnurl-mint" ];
       description = ''
         systemd EnvironmentFile(s) for the secret half of the config -
-        FUNDINGSOURCE_MACAROON / FUNDINGSOURCE_RUNE, and BASE_URL if you'd
-        rather keep it out of the store too. Loaded after `settings`, so
-        values here win on conflict.
+        FUNDINGSOURCE_MACAROON / FUNDINGSOURCE_RUNE or the Spark mnemonic /
+        API key, and BASE_URL if you'd rather keep it out of the store too.
+        Loaded after `settings`, so values here win on conflict.
       '';
     };
   };

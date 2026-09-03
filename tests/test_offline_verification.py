@@ -1,13 +1,15 @@
 import logging
+from hashlib import sha256
 
 from fastapi.testclient import TestClient
 
 from lnurl_mint.config import settings
+from lnurl_mint.db import notes
 from lnurl_mint.signing import verify_note
 from tests.conftest import fresh_secret
 
 
-def test_mint_pubkey_absent_without_a_funding_source(client: TestClient, mint_note, monkeypatch):
+def test_note_lookup_fails_without_a_signing_key(client: TestClient, mint_note, monkeypatch):
     k1 = mint_note(5000)
     # settle the pending mint into a real outstanding note *before* removing
     # the funding source - resolving a not-yet-settled one also depends on
@@ -16,24 +18,47 @@ def test_mint_pubkey_absent_without_a_funding_source(client: TestClient, mint_no
     assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == 5000
     monkeypatch.setattr(settings, "fundingsource_backend", None)
     data = client.get(f"/w?k1={k1}").json()
-    assert data["maxWithdrawable"] == 5000
+    assert data["status"] == "ERROR"
     assert "mintPubkey" not in data
 
 
-def test_signature_absent_without_a_funding_source(client: TestClient, mint_note, monkeypatch):
+def test_mutation_fails_before_burning_without_a_signing_key(client: TestClient, mint_note, monkeypatch):
     k1 = mint_note(5000)
     assert client.get(f"/w?k1={k1}").json()["maxWithdrawable"] == 5000
     monkeypatch.setattr(settings, "fundingsource_backend", None)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&h={h}").json()
-    assert data["status"] == "OK"
+    assert data["status"] == "ERROR"
     assert "sig" not in data
+    assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
+    assert notes.note_amount(h) is None
 
 
 def test_mint_pubkey_is_the_funding_source_nodes_own_identity(client: TestClient, mint_note, node):
     k1 = mint_note(5000)
     data = client.get(f"/w?k1={k1}").json()
     assert data["mintPubkey"] == node.pubkey
+
+
+def test_note_lookup_publishes_previous_signing_keys(client: TestClient, mint_note, node, monkeypatch):
+    old_pubkey = node.pubkey
+    k1 = mint_note(5000)
+    assert client.get(f"/w?k1={k1}").json()["mintPubkey"] == old_pubkey
+
+    from coincurve import PrivateKey
+
+    node.identity_key = PrivateKey()
+    monkeypatch.setattr(settings, "mint_previous_pubkeys", old_pubkey)
+    data = client.get(f"/w?k1={k1}").json()
+    assert data["mintPubkey"] == node.pubkey
+    assert data["previousPubkeys"] == [old_pubkey]
+
+
+def test_previous_signing_keys_must_not_repeat_the_current_key(client: TestClient, mint_note, node, monkeypatch):
+    k1 = mint_note(5000)
+    monkeypatch.setattr(settings, "mint_previous_pubkeys", node.pubkey)
+    data = client.get(f"/w?k1={k1}").json()
+    assert data["status"] == "ERROR"
 
 
 def test_rotate_returns_a_valid_signature(client: TestClient, mint_note, node):
@@ -94,9 +119,7 @@ def test_signature_does_not_verify_against_wrong_pubkey(client: TestClient, mint
     assert not verify_note(wrong_pubkey, h, 5000, data["sig"])
 
 
-def test_signing_failure_is_swallowed_not_raised(client: TestClient, mint_note, node, monkeypatch):
-    # a rotate/split/merge must still succeed even if the node is
-    # unreachable when asked to sign - offline verification is optional
+def test_signing_failure_fails_before_burning(client: TestClient, mint_note, node, monkeypatch):
     async def _broken_sign_message(message, config):
         raise ConnectionError("node unreachable")
 
@@ -104,8 +127,10 @@ def test_signing_failure_is_swallowed_not_raised(client: TestClient, mint_note, 
     k1 = mint_note(5000)
     _, h = fresh_secret()
     data = client.get(f"/w/cb?k1={k1}&h={h}").json()
-    assert data["status"] == "OK"
+    assert data["status"] == "ERROR"
     assert "sig" not in data
+    assert notes.note_amount(sha256(bytes.fromhex(k1)).hexdigest()) == 5000
+    assert notes.note_amount(h) is None
 
 
 def test_signing_failure_is_still_logged(client: TestClient, mint_note, node, monkeypatch, caplog):
@@ -124,6 +149,22 @@ def test_signing_failure_is_still_logged(client: TestClient, mint_note, node, mo
     assert any("sign_note" in r.message and "missing signmessage permission" in r.message for r in caplog.records)
 
 
+def test_retry_returns_the_stored_signature_when_the_signer_is_unavailable(
+    client: TestClient, mint_note, node, monkeypatch
+):
+    k1 = mint_note(5000)
+    _, h = fresh_secret()
+    first = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    assert first["status"] == "OK"
+
+    async def _broken_sign_message(message, config):
+        raise ConnectionError("node unreachable")
+
+    monkeypatch.setattr("lnurl_mint.signing.sign_message", _broken_sign_message)
+    replay = client.get(f"/w/cb?k1={k1}&h={h}").json()
+    assert replay == first
+
+
 def test_mint_pubkey_failure_is_logged(client: TestClient, mint_note, node, monkeypatch, caplog):
     async def _broken_fetch_node_info(config):
         raise ConnectionError("connection refused")
@@ -131,5 +172,6 @@ def test_mint_pubkey_failure_is_logged(client: TestClient, mint_note, node, monk
     monkeypatch.setattr("lnurl_mint.signing.fetch_node_info", _broken_fetch_node_info)
     k1 = mint_note(5000)
     with caplog.at_level(logging.WARNING):
-        client.get(f"/w?k1={k1}")
+        data = client.get(f"/w?k1={k1}").json()
+    assert data["status"] == "ERROR"
     assert any("mint_pubkey" in r.message and "connection refused" in r.message for r in caplog.records)

@@ -15,14 +15,22 @@ from .node import LightningBackendConfig, fetch_node_info, sign_message
 # SDK signs a different (single-sha256) digest it cannot redirect - so
 # instead it signs this exact digest locally with a dedicated key derived
 # from the wallet's own seed (m/25'/0'/0', see spark._sign_message_spark).
-# LUD-25 only RECOMMENDS the node-id key ("SERVICE MAY sign notes with that
-# same call"), and a spark wallet's invoices are signed by its SSP anyway;
+# LUD-25 recommends the funding-node identity where compatible signing is
+# available and permits a dedicated persistent SERVICE key otherwise. A
+# spark wallet's invoices are signed by its SSP anyway;
 # a wallet verifies a note by recovering the key from (digest, sig) and
 # comparing it to the advertised mintPubkey, which holds for any secp256k1
 # key - the spec-digest and wire format below are identical for all three
 # backends, only the key differs.
 _LIGHTNING_SIGNED_MESSAGE_PREFIX = b"Lightning Signed Message:"
 _DOMAIN_TAG = "LNURLcash"
+
+
+class SigningUnavailableError(RuntimeError):
+    """The SERVICE cannot currently produce its mandatory LUD-25 key or
+    signature. Kept distinct from the ValueError used for an invalid note
+    mutation, so the router's safe internal-error handler owns the wire
+    response and never exposes backend details."""
 
 
 def lightning_signed_message_digest(message: str) -> bytes:
@@ -47,35 +55,37 @@ def _message(note_id_hex: str, amount_msat: int) -> str:
     return f"{_DOMAIN_TAG}:{amount_msat}:{note_id_hex}"
 
 
-async def mint_pubkey(config: LightningBackendConfig) -> str | None:
+async def mint_pubkey(config: LightningBackendConfig) -> str:
     """This mint's offline-verification signing key (LUD-25 `mintPubkey`) -
     the funding source node's own identity pubkey for lnd/cln (the same
     key it signs BOLT-11 invoices with, so freshly minted and rotated
     notes verify against the same identity, exactly as the spec
     recommends), and for spark the dedicated seed-derived signing key its
     notes are signed with (see spark._lud25_signing_key - a purely local
-    derivation, no network round trip). None if no funding source is
-    configured or it's unreachable - offline verification is then simply
-    unavailable, the same way funding-source-backed features are when
-    that's unconfigured."""
+    derivation, no network round trip). LUD-25 requires this key on every
+    successful note lookup, so an unavailable signer is an error rather
+    than a response which quietly omits `mintPubkey`."""
     if not config.backend:
-        return None
+        raise SigningUnavailableError("No funding source is configured for note signing.")
     if config.backend == "spark":
         from .spark import signing_pubkey_hex
 
-        return signing_pubkey_hex(config)
+        try:
+            return signing_pubkey_hex(config)
+        except Exception as exc:
+            logging.warning("mint_pubkey: could not derive spark SERVICE signing key: %s", exc)
+            raise SigningUnavailableError("The SERVICE signing key is unavailable.") from exc
     try:
         info = await fetch_node_info(config)
     except Exception as exc:
-        # not raised (offline verification is optional, see this
-        # function's own docstring) but must not vanish with zero trace
-        # either - see sign_note's own except below for the same reasoning
         logging.warning("mint_pubkey: could not reach %s funding source: %s", config.backend, exc)
-        return None
-    return info.uri.split("@")[0] if info.uri else None
+        raise SigningUnavailableError("The SERVICE signing key is unavailable.") from exc
+    if not info.uri:
+        raise SigningUnavailableError("The funding source returned no signing identity.")
+    return info.uri.split("@")[0]
 
 
-async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackendConfig) -> str | None:
+async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackendConfig) -> str:
     """A recoverable signature over (note_id_hex, amount_msat) per LUD-25's
     Offline verification, signed by the funding source node's own
     signmessage RPC, as 65 bytes (r, then s, then recovery id),
@@ -84,23 +94,17 @@ async def sign_note(note_id_hex: str, amount_msat: int, config: LightningBackend
     this mint signs exactly what it was given, never a secret it derived
     itself. The signmessage RPC itself returns recovery-id-leading bytes;
     per LUD-25 those are reordered here into r ‖ s ‖ recovery-id before
-    being handed out, matching raw BOLT11 signatures. None if signing
-    isn't possible right now (no funding source, or it's unreachable) -
-    never raises, since a rotate/split/merge must still succeed without
-    it."""
+    being handed out, matching raw BOLT11 signatures. A rotate, split or
+    merge cannot succeed without this signature: callers obtain it before
+    burning anything, so a missing or unreachable signer fails closed and
+    leaves every input note outstanding."""
     if not config.backend:
-        return None
+        raise SigningUnavailableError("No funding source is configured for note signing.")
     try:
         r_s, recovery_id = await sign_message(_message(note_id_hex, amount_msat), config)
     except Exception as exc:
-        # not raised (see this function's own docstring) but must not
-        # vanish with zero trace either - a signing RPC that always fails
-        # (e.g. a macaroon/rune scoped without signmessage permission)
-        # would otherwise look identical to "everything's fine, offline
-        # verification is just turned off", indistinguishable from the
-        # logs alone
         logging.warning("sign_note: could not sign via %s funding source: %s", config.backend, exc)
-        return None
+        raise SigningUnavailableError("The SERVICE could not sign the replacement note.") from exc
     return (r_s + bytes([recovery_id])).hex()
 
 

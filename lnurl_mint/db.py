@@ -80,7 +80,9 @@ class NoteStore:
                 " h TEXT NOT NULL,"
                 " h2 TEXT,"  # NULL unless this burn was a split
                 " amount1_msat INTEGER NOT NULL,"  # value minted under h
-                " amount2_msat INTEGER)"  # value minted under h2; NULL unless a split
+                " amount2_msat INTEGER,"  # value minted under h2; NULL unless a split
+                " sig TEXT,"  # exact signature returned for h
+                " sig2 TEXT)"  # exact signature returned for h2; NULL unless a split
             )
             # add-a-column migrations for databases created before that
             # column existed - this mint has no other migration mechanism,
@@ -112,6 +114,12 @@ class NoteStore:
             # 0, so a pre-migration row (correctly defaulted to 0) just costs
             # one such check the first time it's polled, same as before
             self._add_column_if_missing(self._conn, "melts", "settled", "INTEGER NOT NULL DEFAULT 0")
+            # a database from before mutation replay stored the output ids
+            # and amounts but recomputed their signatures. Keep those rows
+            # usable and fill their signatures on the first replay; every
+            # new burn records the exact response atomically in swap.
+            self._add_column_if_missing(self._conn, "burns", "sig", "TEXT")
+            self._add_column_if_missing(self._conn, "burns", "sig2", "TEXT")
             self._conn.commit()
         return self._conn
 
@@ -268,7 +276,13 @@ class NoteStore:
         row = self.conn.execute("SELECT pending FROM notes WHERE id = ? AND spent = 0", (note_id,)).fetchone()
         return bool(row and row[0])
 
-    def swap(self, burn_ids: list[str], mint_note_ids: list[str], mint_amounts: list[int]) -> None:
+    def swap(
+        self,
+        burn_ids: list[str],
+        mint_note_ids: list[str],
+        mint_amounts: list[int],
+        mint_signatures: list[str | None] | None = None,
+    ) -> None:
         """Atomically burn every note in `burn_ids` and mint one fresh note
         per (id, amount) in zip(mint_note_ids, mint_amounts). Per LUD-25,
         `mint_note_ids` are hashes the WALLET itself generated and
@@ -289,6 +303,12 @@ class NoteStore:
         in-flight melt (see mark_pending): per the spec, that's a
         distinct "pending" rejection, not a plain invalid/spent one.
 
+        `mint_signatures` records the exact `sig`/`sig2` returned for the
+        new notes. Production callers supply them after signing and before
+        entering this transaction, so a signing failure burns nothing.
+        None remains accepted for direct low-level callers and migrated
+        tests; router.py never uses that compatibility path for a new burn.
+
         Also records this burn (see find_burn) keyed by the exact set of
         `burn_ids`, atomically alongside the burn/mint itself - LUD-25's
         "Retrying a mutation" needs this to answer a retried rotate/split/
@@ -296,6 +316,9 @@ class NoteStore:
         recording it in the same transaction means a crash between burning
         the notes and recording the burn can never happen: either both
         happened, or neither did."""
+        signatures = mint_signatures if mint_signatures is not None else [None] * len(mint_note_ids)
+        if len(mint_note_ids) != len(mint_amounts) or len(mint_note_ids) != len(signatures):
+            raise ValueError("Every minted note needs one amount and one signature slot.")
         with self._lock:
             try:
                 with self.conn:
@@ -316,13 +339,17 @@ class NoteStore:
                             raise ValueError("Invalid or already spent k1.")
                         self.conn.execute("INSERT INTO notes (id, amount_msat) VALUES (?, ?)", (note_id, amount_msat))
                     self.conn.execute(
-                        "INSERT INTO burns (burn_key, h, h2, amount1_msat, amount2_msat) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO burns "
+                        "(burn_key, h, h2, amount1_msat, amount2_msat, sig, sig2) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             self._burn_key(burn_ids),
                             mint_note_ids[0],
                             mint_note_ids[1] if len(mint_note_ids) > 1 else None,
                             mint_amounts[0],
                             mint_amounts[1] if len(mint_amounts) > 1 else None,
+                            signatures[0],
+                            signatures[1] if len(signatures) > 1 else None,
                         ),
                     )
             except sqlite3.Error as exc:
@@ -339,19 +366,36 @@ class NoteStore:
         one up)."""
         return "|".join(sorted(note_ids))
 
-    def find_burn(self, note_ids: list[str]) -> tuple[str, str | None, int, int | None] | None:
+    def find_burn(self, note_ids: list[str]) -> tuple[str, str | None, int, int | None, str | None, str | None] | None:
         """If `note_ids`, as a set, were burned together by one earlier
         rotate/split/merge (see swap), returns the (h, h2, amount1_msat,
-        amount2_msat) that burn produced - everything router.py's LUD-25
-        retry handling (Retrying a mutation) needs to answer a retried
-        callback with the original result instead of "already spent".
+        amount2_msat, sig, sig2) that burn produced - everything
+        router.py's LUD-25 retry handling (Retrying a mutation) needs to
+        answer a retried callback with the original result instead of
+        "already spent".
         None if this exact set of note_ids was never burned together as a
         single swap - including when it only partially overlaps one, which
         is a genuine conflict, not a replay, and must still fail normally."""
         row = self.conn.execute(
-            "SELECT h, h2, amount1_msat, amount2_msat FROM burns WHERE burn_key = ?", (self._burn_key(note_ids),)
+            "SELECT h, h2, amount1_msat, amount2_msat, sig, sig2 FROM burns WHERE burn_key = ?",
+            (self._burn_key(note_ids),),
         ).fetchone()
         return tuple(row) if row else None
+
+    def remember_burn_signatures(self, note_ids: list[str], sig: str, sig2: str | None) -> tuple[str, str | None]:
+        """Fill the missing signature fields on a burn created before this
+        version and return the stored pair. `COALESCE` preserves whichever
+        values another concurrent replay recorded first."""
+        burn_key = self._burn_key(note_ids)
+        with self._lock, self.conn:
+            self.conn.execute(
+                "UPDATE burns SET sig = COALESCE(sig, ?), sig2 = COALESCE(sig2, ?) WHERE burn_key = ?",
+                (sig, sig2, burn_key),
+            )
+            row = self.conn.execute("SELECT sig, sig2 FROM burns WHERE burn_key = ?", (burn_key,)).fetchone()
+        if row is None or row[0] is None:
+            raise ValueError("Unknown burn.")
+        return row[0], row[1]
 
     def record_melt(self, payment_hash: str, pr: str) -> None:
         """Record which invoice a melt is paying into, keyed by its

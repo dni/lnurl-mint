@@ -52,6 +52,13 @@ def _funding_source() -> LightningBackendConfig:
     return funding_source
 
 
+def _previous_mint_pubkeys(current_pubkey: str) -> list[str] | None:
+    previous = settings.previous_mint_pubkeys()
+    if current_pubkey.lower() in previous:
+        raise RuntimeError("MINT_PREVIOUS_PUBKEYS must not contain the current SERVICE signing key.")
+    return previous or None
+
+
 # backoff between is_payment_complete retries, when pay_invoice's own
 # outcome was ambiguous - gives a momentary funding-source hiccup (the one
 # case a retry can actually fix) a chance to clear before _melt_pay gives
@@ -598,6 +605,7 @@ async def _mint_address_response(req: Request) -> LnurlMintAddressResponse:
         maxWithdrawable=max_mintable_msat(),
         defaultDescription=f"lnurlcash bearer note on {host}",
         mintPubkey=mint_pubkey_value,
+        previousPubkeys=_previous_mint_pubkeys(mint_pubkey_value) if mint_pubkey_value else None,
         payLink=f"{base}/.well-known/lnurlp/{settings.username}",
         nodeAlias=node_alias,
         nodeUri=node_uri,
@@ -829,13 +837,15 @@ async def get_withdraw(
     # spoofable via a plain Host header even behind a proxy) - same as
     # get_lnaddress/get_pay_callback
     base, host = settings.public_base_url_and_host(str(req.base_url))
+    current_pubkey = await mint_pubkey(settings.funding_source())
     return LnurlWithdrawResponse(
         callback=f"{base}/w/cb",
         k1=k1,
         minWithdrawable=amount_msat,
         maxWithdrawable=amount_msat,
         defaultDescription=f"lnurlcash bearer note on {host}",
-        mintPubkey=await mint_pubkey(settings.funding_source()),
+        mintPubkey=current_pubkey,
+        previousPubkeys=_previous_mint_pubkeys(current_pubkey),
     )
 
 
@@ -870,8 +880,8 @@ async def get_withdraw_callback(
       used is likewise rejected (the funding source dedupes by payment
       hash, so it would burn the note without moving funds).
     - Every note minted here (never on melt) is signed per Offline
-      verification, over the hash WALLET supplied - omitted if no funding
-      source is configured or signing fails (see signing.sign_note).
+      verification, over the hash WALLET supplied. Signing happens before
+      NoteStore.swap, so an unavailable signer burns nothing.
     - If any k1 is invalid the whole request fails atomically
       (NoteStore.swap); a k1 already reserved by another in-flight melt
       fails with reason "pending" instead (NoteStore.mark_pending).
@@ -879,7 +889,7 @@ async def get_withdraw_callback(
       that setting's own docstring in config.py.
     - LUD-25's Retrying a mutation: a rotate/split/merge whose k1(s), h, h2
       and amount exactly match an earlier completed one gets that same
-      result replayed (sig/sig2 recomputed, deterministic per RFC6979)
+      result replayed with its recorded sig/sig2
       instead of "already spent" (see NoteStore.find_burn/swap). Melt is
       unaffected - LUD-25 only asks this of rotate/split/merge."""
     if len(k1) > settings.max_k1s:
@@ -922,17 +932,25 @@ async def get_withdraw_callback(
         if all(HEX32_PATTERN.match(note_k1) for note_k1 in k1):
             burn = notes.find_burn([_note_id(note_k1) for note_k1 in k1])
             if burn is not None:
-                recorded_h, recorded_h2, amount1_msat, amount2_msat = burn
+                recorded_h, recorded_h2, amount1_msat, amount2_msat, recorded_sig, recorded_sig2 = burn
                 recorded_amount = amount1_msat if recorded_h2 is not None else None
                 if recorded_h == h and recorded_h2 == h2 and recorded_amount == amount:
-                    funding_source = settings.funding_source()
-                    sig = await sign_note(recorded_h, amount1_msat, funding_source)
-                    sig2 = (
-                        await sign_note(recorded_h2, amount2_msat, funding_source)
-                        if recorded_h2 is not None and amount2_msat is not None
-                        else None
-                    )
-                    return WithdrawSuccessResponse(sig=sig, sig2=sig2)
+                    # Burns written before signatures were persisted have
+                    # NULL here. Sign and remember them once as an upgrade
+                    # compatibility path; every new burn stores its exact
+                    # response inside the swap transaction below.
+                    if recorded_sig is None or (recorded_h2 is not None and recorded_sig2 is None):
+                        funding_source = settings.funding_source()
+                        recorded_sig = await sign_note(recorded_h, amount1_msat, funding_source)
+                        recorded_sig2 = (
+                            await sign_note(recorded_h2, amount2_msat, funding_source)
+                            if recorded_h2 is not None and amount2_msat is not None
+                            else None
+                        )
+                        recorded_sig, recorded_sig2 = notes.remember_burn_signatures(
+                            [_note_id(note_k1) for note_k1 in k1], recorded_sig, recorded_sig2
+                        )
+                    return WithdrawSuccessResponse(sig=recorded_sig, sig2=recorded_sig2)
 
     note_ids: list[str] = []
     values: list[int] = []
@@ -940,6 +958,12 @@ async def get_withdraw_callback(
         resolved = await _resolve_note(note_k1)
         if resolved is None:
             raise HTTPException(HTTPStatus.BAD_REQUEST, "Invalid or already spent k1.")
+        # Check the pending state before asking the signer to do any work.
+        # NoteStore.swap repeats this under its transaction lock to close
+        # races, but a note already known to be pending has the spec's
+        # distinct response regardless of signer availability.
+        if notes.note_pending(resolved[0]):
+            raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
         note_ids.append(resolved[0])
         values.append(resolved[1])
     total_msat = sum(values)
@@ -1045,12 +1069,11 @@ async def get_withdraw_callback(
             # h/h2 are validated present and well-formed above, whenever
             # pr is None and amount is not - both true in this branch
             assert h is not None and h2 is not None
-            notes.swap(note_ids, [h, h2], [amount, change_amount])
             funding_source = settings.funding_source()
-            return WithdrawSuccessResponse(
-                sig=await sign_note(h, amount, funding_source),
-                sig2=await sign_note(h2, change_amount, funding_source),
-            )
+            sig = await sign_note(h, amount, funding_source)
+            sig2 = await sign_note(h2, change_amount, funding_source)
+            notes.swap(note_ids, [h, h2], [amount, change_amount], [sig, sig2])
+            return WithdrawSuccessResponse(sig=sig, sig2=sig2)
 
         # rotate is a merge of one note - the refund below is exactly 0
         # then, so it's covered by this same branch without a special case.
@@ -1060,8 +1083,9 @@ async def get_withdraw_callback(
         assert h is not None  # validated above, whenever pr is None
         refund = (len(note_ids) - 1) * settings.base_fee_msat
         merged_amount = total_msat + refund
-        notes.swap(note_ids, [h], [merged_amount])
-        return WithdrawSuccessResponse(sig=await sign_note(h, merged_amount, settings.funding_source()))
+        sig = await sign_note(h, merged_amount, settings.funding_source())
+        notes.swap(note_ids, [h], [merged_amount], [sig])
+        return WithdrawSuccessResponse(sig=sig)
     except PendingNoteError:
         raise HTTPException(HTTPStatus.BAD_REQUEST, "pending")
     except ValueError as exc:
