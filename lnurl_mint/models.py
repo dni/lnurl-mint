@@ -135,6 +135,12 @@ class LnurlMintAddressResponse(BaseModel):
     # discovering this endpoint gets the same picture without scraping HTML
     nodeNumChannels: int | None = None
     nodeNumPeers: int | None = None
+    # advance warning of a planned shutdown (config.py's SUNSET_DATE),
+    # ISO-8601 (e.g. "2026-12-31") - None whenever it's unset, same as
+    # every other optional field here. Independent of sunset_mint (which
+    # actually stops minting): the whole point is to let a wallet warn its
+    # user *before* that happens, not just report it once it already has.
+    sunsetDate: str | None = None
 
 
 class WithdrawSuccessResponse(BaseModel):

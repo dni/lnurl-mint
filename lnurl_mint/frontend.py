@@ -89,6 +89,11 @@ $theme_color_meta
   p.hint { color: #9a978f; font-size: .85rem; margin-top: 1.5rem; line-height: 1.5; }
   p.hint a { color: var(--mint-bright); }
   p.hint code { font-family: ui-monospace, monospace; color: #e6e4dd; }
+  p.sunset-warning {
+    margin-top: 0; margin-bottom: 1.5rem; padding: .6rem .8rem;
+    background: rgba(230, 168, 80, .12); border: 1px solid #e6a850; border-radius: 8px;
+    color: #e6a850; font-weight: 600;
+  }
   h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
        color: var(--mint); margin: 1.5rem 0 .5rem; }
   table { width: 100%; border-collapse: collapse; font-size: .85rem; }
@@ -122,6 +127,7 @@ $theme_color_meta
 <main>
   <h1>$title</h1>
   <p class="desc">$description</p>
+  $sunset_warning
   $pay_section
   $tor_section
   $mint_section
@@ -147,6 +153,12 @@ $theme_color_meta
 </body>
 </html>
 """
+)
+
+SUNSET_WARNING = Template(
+    """<p class="hint sunset-warning">
+    &#9888; This mint plans to stop operating on <strong>$date</strong>. Melt or migrate any notes before then.
+  </p>"""
 )
 
 PAY_SECTION = Template(
@@ -284,6 +296,18 @@ def _pay_section(lnurl: str, address: str) -> str:
     )
 
 
+def _sunset_warning() -> str:
+    """A visible heads-up banner once SUNSET_DATE is configured (see
+    config.py's own docstring) - shown independently of sunset_mint: the
+    whole point is to warn holders *before* minting actually stops, not
+    just report it once it already has, so this appears whether or not
+    sunset_mint is on yet. Empty (no banner at all) when unset - most
+    mints never plan to sunset."""
+    if not settings.sunset_date:
+        return ""
+    return SUNSET_WARNING.substitute(date=settings.sunset_date.isoformat())
+
+
 def _mint_section() -> str:
     """The Mint table, and its heading. Both describe amounts a new note may
     be minted for, so both go while sunsetting: there are no new notes, and
@@ -409,6 +433,7 @@ async def index(req: Request) -> HTMLResponse:
     page = PAGE.substitute(
         title=html.escape(settings.title),
         description=html.escape(settings.description),
+        sunset_warning=_sunset_warning(),
         pay_section=_pay_section(lnurl, address),
         tor_section=_tor_section(base),
         theme_color_meta=theme_color_meta,
